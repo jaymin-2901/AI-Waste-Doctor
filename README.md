@@ -149,6 +149,24 @@ python model/generate_sample_model.py
 python main.py
 ```
 
+## ☁️ Deploy the API on Render
+
+The PySide6 desktop application runs locally on Windows. For a hosted service, this repository includes a separate FastAPI image-classification API for Render.
+
+1. In Render, choose **New → Blueprint** and select this GitHub repository.
+2. Render reads `render.yaml` and installs Python 3.11 from `runtime.txt`.
+3. The API uses `requirements.render.txt`, which includes TensorFlow CPU support and excludes desktop-only packages.
+4. After deployment, test:
+
+```text
+GET https://YOUR-RENDER-SERVICE.onrender.com/health
+POST https://YOUR-RENDER-SERVICE.onrender.com/predict
+```
+
+For `/predict`, send an image as multipart form data with the field name `file`.
+
+The deployed API returns the predicted category, confidence, all class probabilities, and whether the model is loaded. The Vercel frontend can call this API; the PySide6 desktop app remains the local Windows application.
+
 ---
 
 ## 🤖 Placing Your Trained AI Model
