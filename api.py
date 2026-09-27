@@ -28,12 +28,19 @@ def health_check() -> dict:
         "status": "ok",
         "model_loaded": not classifier.demo_mode,
         "labels": classifier.labels,
+        "model_status": classifier.status_message,
+        "model_error": classifier.model_error,
     }
 
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "model_loaded": not classifier.demo_mode}
+    return {
+        "status": "ok",
+        "model_loaded": not classifier.demo_mode,
+        "model_status": classifier.status_message,
+        "model_error": classifier.model_error,
+    }
 
 
 @app.post("/predict")

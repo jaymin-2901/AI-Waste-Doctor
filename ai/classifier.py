@@ -41,6 +41,7 @@ class WasteClassifier:
         self.model = None
         self.demo_mode = False
         self.status_message = "Initializing AI Classifier..."
+        self.model_error = ""
         
         # Stability / Smoothing Parameters
         self.smoothing_frames = max(1, smoothing_frames)
@@ -105,6 +106,7 @@ class WasteClassifier:
                 model_loaded = True
                 print(f"[Classifier] Successfully loaded Keras model from: {self.model_path}")
             except Exception as e:
+                self.model_error = str(e)
                 print(f"[Classifier] Error loading model file {self.model_path}: {e}")
 
         elif saved_model_dir.exists():
@@ -113,6 +115,7 @@ class WasteClassifier:
                 model_loaded = True
                 print(f"[Classifier] Successfully loaded SavedModel from: {saved_model_dir}")
             except Exception as e:
+                self.model_error = str(e)
                 print(f"[Classifier] Error loading SavedModel from {saved_model_dir}: {e}")
 
         if model_loaded:
