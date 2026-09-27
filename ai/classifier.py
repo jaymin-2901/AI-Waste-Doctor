@@ -14,11 +14,16 @@ from ai.preprocessing import preprocess_frame
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_NUM_INTRAOP_THREADS"] = "1"
+os.environ["TF_NUM_INTEROP_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 # Try importing TensorFlow/Keras
 try:
     import tensorflow as tf
     tf.get_logger().setLevel("ERROR")
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
     TF_AVAILABLE = True
 except ImportError:
     tf = None
@@ -156,7 +161,9 @@ class WasteClassifier:
                 )
                 
                 # Model inference
-                preds = np.asarray(self.model.predict(batch_img, verbose=0)[0], dtype=np.float32)
+                # Direct eager inference avoids Keras' predict data pipeline for
+                # one image and keeps memory/thread use low on Render's free tier.
+                preds = np.asarray(self.model(batch_img, training=False)[0].numpy(), dtype=np.float32)
 
                 if preds.ndim != 1 or not np.all(np.isfinite(preds)):
                     raise ValueError("Model returned invalid prediction values")
