@@ -1,6 +1,7 @@
 """AI Waste Doctor browser frontend for Streamlit Cloud."""
 
 import os
+import time
 
 import requests
 import streamlit as st
@@ -72,22 +73,37 @@ with upload_col:
         if st.button("CLASSIFY OBJECT", type="primary", use_container_width=True):
             with st.spinner("Analyzing object..."):
                 try:
-                    health = requests.get(f"{API_URL}/health", timeout=30)
-                    health.raise_for_status()
-                    health_data = health.json()
-                    if not health_data.get("model_loaded", False):
-                        detail = health_data.get("model_error") or health_data.get("model_status") or "Model is not loaded"
-                        st.error(f"The Render service is online but its model is unavailable: {detail}")
-                        st.stop()
-                    response = requests.post(
-                        f"{API_URL}/predict",
-                        files={"file": (selected_file.name, selected_file.getvalue(), selected_file.type)},
-                        timeout=120,
-                    )
-                    response.raise_for_status()
+                    image_payload = {
+                        "file": (selected_file.name, selected_file.getvalue(), selected_file.type)
+                    }
+                    response = None
+                    last_error = None
+                    for attempt in range(3):
+                        health = requests.get(f"{API_URL}/health", timeout=45)
+                        health.raise_for_status()
+                        health_data = health.json()
+                        if not health_data.get("model_loaded", False):
+                            last_error = health_data.get("model_error") or health_data.get("model_status") or "Model is not loaded"
+                        else:
+                            response = requests.post(
+                                f"{API_URL}/predict",
+                                files=image_payload,
+                                timeout=180,
+                            )
+                            if response.status_code < 500:
+                                response.raise_for_status()
+                                break
+                            last_error = f"Prediction service returned HTTP {response.status_code}"
+                        if attempt < 2:
+                            time.sleep(4)
+
+                    if response is None or response.status_code >= 500:
+                        raise RuntimeError(last_error or "Prediction service did not respond")
                     st.session_state["result"] = response.json()
                 except requests.RequestException as error:
                     st.error(f"Classification service unavailable: {error}")
+                except RuntimeError as error:
+                    st.error(f"Classification service is waking up or restarting: {error}. Please try once more in a few seconds.")
     else:
         st.markdown('<p class="caption">Place one object clearly in the image for the most reliable result.</p>', unsafe_allow_html=True)
 
