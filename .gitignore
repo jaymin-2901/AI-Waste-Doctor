@@ -1,0 +1,22 @@
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# Local runtime output and user-specific settings
+data/results.csv
+data/config.json
+*.log
+
+# Training data is kept locally and is not part of the application package
+dataset/
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
