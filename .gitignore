@@ -20,3 +20,8 @@ dataset/
 .idea/
 .DS_Store
 Thumbs.db
+
+# PyInstaller build output
+build/
+dist/
+*.spec
