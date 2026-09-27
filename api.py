@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ai.classifier import WasteClassifier
 
 app = FastAPI(title="AI Waste Doctor API", version="1.0.0")
+API_BUILD = "2026-09-27-model-api"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -25,7 +26,9 @@ classifier = WasteClassifier(smoothing_frames=1)
 def health_check() -> dict:
     return {
         "service": "AI Waste Doctor API",
+        "build": API_BUILD,
         "status": "ok",
+        "build": API_BUILD,
         "model_loaded": not classifier.demo_mode,
         "labels": classifier.labels,
         "model_status": classifier.status_message,

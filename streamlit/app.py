@@ -72,6 +72,13 @@ with upload_col:
         if st.button("CLASSIFY OBJECT", type="primary", use_container_width=True):
             with st.spinner("Analyzing object..."):
                 try:
+                    health = requests.get(f"{API_URL}/health", timeout=30)
+                    health.raise_for_status()
+                    health_data = health.json()
+                    if not health_data.get("model_loaded", False):
+                        detail = health_data.get("model_error") or health_data.get("model_status") or "Model is not loaded"
+                        st.error(f"The Render service is online but its model is unavailable: {detail}")
+                        st.stop()
                     response = requests.post(
                         f"{API_URL}/predict",
                         files={"file": (selected_file.name, selected_file.getvalue(), selected_file.type)},
