@@ -78,24 +78,27 @@ with upload_col:
                     }
                     response = None
                     last_error = None
-                    for attempt in range(3):
-                        health = requests.get(f"{API_URL}/health", timeout=45)
-                        health.raise_for_status()
-                        health_data = health.json()
-                        if not health_data.get("model_loaded", False):
-                            last_error = health_data.get("model_error") or health_data.get("model_status") or "Model is not loaded"
-                        else:
-                            response = requests.post(
-                                f"{API_URL}/predict",
-                                files=image_payload,
-                                timeout=180,
-                            )
-                            if response.status_code < 500:
-                                response.raise_for_status()
-                                break
-                            last_error = f"Prediction service returned HTTP {response.status_code}"
-                        if attempt < 2:
-                            time.sleep(4)
+                    for attempt in range(5):
+                        try:
+                            health = requests.get(f"{API_URL}/health", timeout=45)
+                            health.raise_for_status()
+                            health_data = health.json()
+                            if not health_data.get("model_loaded", False):
+                                last_error = health_data.get("model_error") or health_data.get("model_status") or "Model is not loaded"
+                            else:
+                                response = requests.post(
+                                    f"{API_URL}/predict",
+                                    files=image_payload,
+                                    timeout=180,
+                                )
+                                if response.status_code < 500:
+                                    response.raise_for_status()
+                                    break
+                                last_error = f"Prediction service returned HTTP {response.status_code}"
+                        except requests.RequestException as error:
+                            last_error = str(error)
+                        if attempt < 4:
+                            time.sleep(8)
 
                     if response is None or response.status_code >= 500:
                         raise RuntimeError(last_error or "Prediction service did not respond")
