@@ -167,6 +167,18 @@ For `/predict`, send an image as multipart form data with the field name `file`.
 
 The deployed API returns the predicted category, confidence, all class probabilities, and whether the model is loaded. The Vercel frontend can call this API; the PySide6 desktop app remains the local Windows application.
 
+## 🌐 Deploy the Streamlit Frontend
+
+In Streamlit Community Cloud, choose **New app** and use:
+
+```text
+Repository: jaymin-2901/AI-Waste-Doctor
+Branch: main
+Main file path: streamlit/app.py
+```
+
+Streamlit installs the dependencies from `streamlit/requirements.txt`. The browser app sends images to the Render API at `https://ai-waste-doctor-api.onrender.com` and does not require the local desktop dependencies.
+
 ---
 
 ## 🤖 Placing Your Trained AI Model
