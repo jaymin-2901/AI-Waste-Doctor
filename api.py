@@ -1,19 +1,28 @@
 """Render web API for AI Waste Doctor image classification."""
 
-from io import BytesIO
+import os
 
 import cv2
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from ai.classifier import WasteClassifier
 
 app = FastAPI(title="AI Waste Doctor API", version="1.0.0")
 API_BUILD = "2026-09-27-model-api"
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+allowed_origins = [
+    origin.strip()
+    for origin in os.getenv("AI_WASTE_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -28,7 +37,6 @@ def health_check() -> dict:
         "service": "AI Waste Doctor API",
         "build": API_BUILD,
         "status": "ok",
-        "build": API_BUILD,
         "model_loaded": not classifier.demo_mode,
         "labels": classifier.labels,
         "model_status": classifier.status_message,
@@ -38,24 +46,42 @@ def health_check() -> dict:
 
 @app.get("/health")
 def health() -> dict:
-    return {
-        "status": "ok",
+    payload = {
+        "status": "ok" if not classifier.demo_mode else "degraded",
+        "ready": not classifier.demo_mode,
         "model_loaded": not classifier.demo_mode,
         "model_status": classifier.status_message,
         "model_error": classifier.model_error,
     }
+    if classifier.demo_mode:
+        return JSONResponse(status_code=503, content=payload)
+    return payload
 
 
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)) -> dict:
-    if not file.content_type or not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=415, detail="Upload a valid image file")
+    if classifier.demo_mode:
+        raise HTTPException(status_code=503, detail="The classification model is not ready")
 
-    image_bytes = await file.read()
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(status_code=415, detail="Upload a JPEG, PNG, or WebP image")
+
+    content_length = file.headers.get("content-length")
+    if content_length:
+        try:
+            declared_size = int(content_length)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Invalid Content-Length header") from error
+        if declared_size > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Image exceeds the 10 MB upload limit")
+
+    image_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(image_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Image exceeds the 10 MB upload limit")
     if not image_bytes:
         raise HTTPException(status_code=400, detail="The uploaded image is empty")
 
-    image = cv2.imdecode(np.frombuffer(BytesIO(image_bytes).getvalue(), np.uint8), cv2.IMREAD_COLOR)
+    image = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         raise HTTPException(status_code=400, detail="The image could not be decoded")
 

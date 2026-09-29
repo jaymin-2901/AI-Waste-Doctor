@@ -156,7 +156,8 @@ The PySide6 desktop application runs locally on Windows. For a hosted service, t
 1. In Render, choose **New → Blueprint** and select this GitHub repository.
 2. Render reads `render.yaml` and installs Python 3.11 from `runtime.txt`.
 3. The API uses `requirements.render.txt`, which includes TensorFlow CPU support and excludes desktop-only packages.
-4. After deployment, test:
+4. In the Render service environment settings, set `AI_WASTE_ALLOWED_ORIGINS` to the browser frontend origin if a browser client will call the API directly. Use a comma-separated list for multiple trusted origins. The current Streamlit frontend makes server-side API requests, so this can remain empty unless another browser client is added.
+5. After deployment, test:
 
 ```text
 GET https://YOUR-RENDER-SERVICE.onrender.com/health
@@ -166,6 +167,8 @@ POST https://YOUR-RENDER-SERVICE.onrender.com/predict
 For `/predict`, send an image as multipart form data with the field name `file`.
 
 The deployed API returns the predicted category, confidence, all class probabilities, and whether the model is loaded. The Vercel frontend can call this API; the PySide6 desktop app remains the local Windows application.
+
+The API accepts JPEG, PNG, and WebP images up to 10 MB. `/health` returns HTTP 503 until the trained model is loaded; this prevents Render from treating a broken model deployment as healthy. A missing or invalid model must be fixed before public use; the API will not serve demo predictions.
 
 ## 🌐 Deploy the Streamlit Frontend
 
@@ -178,6 +181,8 @@ Main file path: streamlit/app.py
 ```
 
 Streamlit installs the dependencies from `streamlit/requirements.txt`. The browser app sends images to the Render API at `https://ai-waste-doctor-api.onrender.com` and does not require the local desktop dependencies.
+
+After both services deploy, open the Streamlit URL and classify a test image. If the frontend reports that the API is unavailable, confirm the API `/health` endpoint returns `200`, verify the `AI_WASTE_API_URL` Streamlit variable has no trailing path, and check the Render logs for model loading errors.
 
 ---
 

@@ -9,3 +9,5 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.11
+      - key: AI_WASTE_ALLOWED_ORIGINS
+        sync: false

@@ -131,9 +131,6 @@ class MainWindow(QMainWindow):
         if self.science_fair_overlay is None or not self.science_fair_overlay.isVisible():
             self.science_fair_overlay = ScienceFairOverlay(self.camera_manager, self.classifier, parent=None)
             self.science_fair_overlay.closed_signal.connect(self.on_science_fair_closed)
-            self.science_fair_overlay.scan_result_captured.connect(
-                self.tab_experiment.update_live_prediction
-            )
             self.science_fair_overlay.showFullScreen()
 
     @Slot()
