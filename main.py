@@ -69,7 +69,8 @@ def main():
     camera_manager = CameraManager(
         camera_index=settings.get("camera_index", 0),
         mirror=settings.get("mirror_webcam", True),
-        show_fps=settings.get("show_fps", True)
+        show_fps=settings.get("show_fps", True),
+        scan_zone_ratio=settings.get("scan_zone_ratio", 0.6)
     )
 
     # Start camera capture thread on boot

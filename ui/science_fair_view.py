@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
 )
 
 from config import CATEGORY_GUIDANCE, GENERIC_GUIDANCE, config_manager
+from ai.live_decision import StableDecisionTracker
+from ui.hardware import LightOutput, MetalSensor
 from ui.theme import ThemeManager
 from ui.widgets import ScanZoneVideoWidget, ConfidenceProgressBar, CategoryGuidanceCard
 from ui.feedback import play_decision_buzzer
@@ -31,6 +33,12 @@ class ScienceFairOverlay(QWidget):
         self.candidate_class = None
         self.candidate_count = 0
         self.final_decision_locked = False
+        self.decision_tracker = StableDecisionTracker(
+            threshold=config_manager.get("confidence_threshold", 70.0),
+            required_frames=config_manager.get("live_decision_frames", 3),
+        )
+        self.light_output = LightOutput(simulation=True)
+        self.metal_sensor = MetalSensor()
 
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         t = ThemeManager.get_theme()
@@ -107,6 +115,12 @@ class ScienceFairOverlay(QWidget):
 
         h_layout.addLayout(titles_v, 1)
         h_layout.addWidget(tag_lbl)
+        self.feedback_status = QLabel("LIGHTS: SIMULATION")
+        self.feedback_status.setStyleSheet(f"color: {t['accent_secondary']}; font-weight: 800; font-size: 12px;")
+        h_layout.addWidget(self.feedback_status)
+        self.metal_status = QLabel("METAL SENSOR: NOT CONNECTED")
+        self.metal_status.setStyleSheet(f"color: {t['text_secondary']}; font-weight: 700; font-size: 12px;")
+        h_layout.addWidget(self.metal_status)
         h_layout.addSpacing(16)
         h_layout.addWidget(self.btn_reset)
         h_layout.addWidget(self.btn_exit)
@@ -208,6 +222,21 @@ class ScienceFairOverlay(QWidget):
 
         self.video_widget.update_frame(qimage)
 
+        if not connected or raw_bgr_frame is None:
+            self.decision_tracker.reset()
+            self.final_decision_locked = False
+            self.light_output.clear()
+            self.lbl_class.setText("CAMERA UNAVAILABLE")
+            self.lbl_conf.setText(status_msg)
+            self.lbl_uncertain.setVisible(True)
+            return
+
+        metal_reading = self.metal_sensor.read()
+        self.metal_status.setText(
+            "METAL SENSOR: DETECTED" if metal_reading else "METAL SENSOR: NOT CONNECTED"
+            if metal_reading is None else "METAL SENSOR: CLEAR"
+        )
+
         if raw_bgr_frame is not None:
             if self.final_decision_locked:
                 return
@@ -220,25 +249,25 @@ class ScienceFairOverlay(QWidget):
             norm_mode = config_manager.get("normalization_mode", "-1_to_1")
             result = self.classifier.predict(raw_bgr_frame, crop_box=scan_zone_box, normalization_mode=norm_mode)
 
-            top_class = result.get("top_class", "")
-            top_conf = result.get("top_confidence", 0.0)
-            is_confident = result.get("is_confident", True)
+            smoothed = result.get("smoothed_predictions", {})
+            snapshot = self.decision_tracker.update(smoothed)
+            top_class = snapshot.top_class
+            top_conf = snapshot.confidence
+            is_confident = snapshot.is_confident
 
             if not is_confident:
                 self.candidate_class = None
                 self.candidate_count = 0
-            elif top_class == self.candidate_class:
-                self.candidate_count += 1
             else:
                 self.candidate_class = top_class
-                self.candidate_count = 1
+                self.candidate_count = snapshot.consecutive_frames
 
-            if is_confident and self.candidate_count >= 3:
+            if snapshot.is_final and not self.final_decision_locked:
                 self.final_decision_locked = True
+                self.light_output.set_category(top_class)
+                self.feedback_status.setText(f"LIGHT: {self.light_output.state.light.upper()} · BUZZER: ONCE")
                 play_decision_buzzer()
                 self.scan_result_captured.emit(top_class, top_conf)
-
-            smoothed = result.get("smoothed_predictions", {})
 
             t = ThemeManager.get_theme()
             if is_confident:
@@ -280,6 +309,9 @@ class ScienceFairOverlay(QWidget):
         self.final_decision_locked = False
         self.candidate_class = None
         self.candidate_count = 0
+        self.decision_tracker.reset()
+        self.light_output.clear()
+        self.feedback_status.setText("LIGHTS: SIMULATION")
         self.classifier.history_buffer.clear()
         for bar in self.confidence_bars.values():
             bar.set_final_decision(False)
@@ -289,5 +321,7 @@ class ScienceFairOverlay(QWidget):
         self.lbl_uncertain.setVisible(False)
 
     def close_view(self):
+        self.light_output.close()
+        self.metal_sensor.close()
         self.close()
         self.closed_signal.emit()

@@ -36,9 +36,25 @@ tf.get_logger().setLevel("ERROR")
 CLASS_NAMES = ["Recyclable", "Dry Waste", "Wet Waste"]
 KAGGLE_CLASS_NAMES = ["Recyclable", "Non-Recyclable", "Organic"]
 IMAGE_SIZE = (224, 224)
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
 
 
-def train(dataset_dir: Path, output_path: Path, epochs: int, batch_size: int) -> None:
+def _count_images(directory: Path) -> int:
+    return sum(
+        1
+        for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+    )
+
+
+def train(
+    dataset_dir: Path,
+    output_path: Path,
+    epochs: int,
+    batch_size: int,
+    fine_tune_epochs: int = 8,
+    fine_tune_layers: int = 30,
+) -> None:
     """Train and save a MobileNetV2 waste classifier."""
     if all((dataset_dir / name).is_dir() for name in CLASS_NAMES):
         source_class_names = CLASS_NAMES
@@ -51,14 +67,16 @@ def train(dataset_dir: Path, output_path: Path, epochs: int, batch_size: int) ->
             f"Expected either {CLASS_NAMES} or {KAGGLE_CLASS_NAMES} folders under {dataset_dir}."
         )
 
-    e_waste_dirs = [
-        path for path in (dataset_dir / "Recyclable").rglob("*")
-        if path.is_dir() and path.name.lower().replace("_", "-") == "e-waste"
-    ]
+    class_counts = {
+        class_name: _count_images(dataset_dir / class_name)
+        for class_name in source_class_names
+    }
     e_waste_images = sum(
-        1 for directory in e_waste_dirs for path in directory.rglob("*")
-        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".gif"}
+        _count_images(path)
+        for path in (dataset_dir / "Recyclable").rglob("*")
+        if path.is_dir() and path.name.lower().replace("_", "-") == "e-waste"
     )
+    print(f"Dataset image counts: {class_counts}")
     if e_waste_images == 0:
         print(
             "WARNING: No e-waste images found. Add phone/electronics photos to "
@@ -94,6 +112,15 @@ def train(dataset_dir: Path, output_path: Path, epochs: int, batch_size: int) ->
     class_index_map = tf.constant(source_to_app_index, dtype=tf.int32)
     train_ds = train_ds.map(lambda images, labels: (images, tf.gather(class_index_map, labels)))
     validation_ds = validation_ds.map(lambda images, labels: (images, tf.gather(class_index_map, labels)))
+    train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
+    validation_ds = validation_ds.prefetch(tf.data.AUTOTUNE)
+
+    total_images = sum(class_counts.values())
+    class_weights = {
+        index: total_images / (len(source_class_names) * class_counts[class_name])
+        for index, class_name in enumerate(source_class_names)
+        if class_counts[class_name]
+    }
 
     augmentation = keras.Sequential(
         [
@@ -139,8 +166,31 @@ def train(dataset_dir: Path, output_path: Path, epochs: int, batch_size: int) ->
         validation_data=validation_ds,
         epochs=epochs,
         callbacks=callbacks,
+        class_weight=class_weights,
         shuffle=False,
     )
+
+    if fine_tune_epochs > 0 and fine_tune_layers > 0:
+        base_model.trainable = True
+        for layer in base_model.layers[:-fine_tune_layers]:
+            layer.trainable = False
+        for layer in base_model.layers:
+            if isinstance(layer, layers.BatchNormalization):
+                layer.trainable = False
+
+        model.compile(
+            optimizer=keras.optimizers.Adam(learning_rate=1e-5),
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"],
+        )
+        model.fit(
+            train_ds,
+            validation_data=validation_ds,
+            epochs=fine_tune_epochs,
+            callbacks=callbacks,
+            class_weight=class_weights,
+            shuffle=False,
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     model.save(output_path)
@@ -161,8 +211,17 @@ def main() -> None:
     )
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--fine-tune-epochs", type=int, default=8)
+    parser.add_argument("--fine-tune-layers", type=int, default=30)
     args = parser.parse_args()
-    train(args.dataset, args.output, args.epochs, args.batch_size)
+    train(
+        args.dataset,
+        args.output,
+        args.epochs,
+        args.batch_size,
+        args.fine_tune_epochs,
+        args.fine_tune_layers,
+    )
 
 
 if __name__ == "__main__":

@@ -11,9 +11,10 @@ from fastapi.responses import JSONResponse
 from ai.classifier import WasteClassifier
 
 app = FastAPI(title="AI Waste Doctor API", version="1.0.0")
-API_BUILD = "2026-09-27-model-api"
+API_BUILD = "2026-10-01-balanced-finetuned-square-crop"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+SCAN_ZONE_RATIO = 0.6
 allowed_origins = [
     origin.strip()
     for origin in os.getenv("AI_WASTE_ALLOWED_ORIGINS", "").split(",")
@@ -29,6 +30,12 @@ app.add_middleware(
 )
 
 classifier = WasteClassifier(smoothing_frames=1)
+
+
+def get_scan_zone(width: int, height: int, ratio: float = SCAN_ZONE_RATIO) -> tuple[int, int, int, int]:
+    """Return the same centered square crop used by the desktop webcam."""
+    box_size = int(min(width, height) * ratio)
+    return ((width - box_size) // 2, (height - box_size) // 2, box_size, box_size)
 
 
 @app.get("/")
@@ -47,6 +54,7 @@ def health_check() -> dict:
 @app.get("/health")
 def health() -> dict:
     payload = {
+        "build": API_BUILD,
         "status": "ok" if not classifier.demo_mode else "degraded",
         "ready": not classifier.demo_mode,
         "model_loaded": not classifier.demo_mode,
@@ -85,10 +93,13 @@ async def predict(file: UploadFile = File(...)) -> dict:
     if image is None:
         raise HTTPException(status_code=400, detail="The image could not be decoded")
 
+    crop_box = get_scan_zone(image.shape[1], image.shape[0])
     classifier.history_buffer.clear()
-    result = classifier.predict(image, normalization_mode="-1_to_1")
+    result = classifier.predict(image, crop_box=crop_box, normalization_mode="-1_to_1")
     return {
         "filename": file.filename,
+        "build": API_BUILD,
+        "crop_box": crop_box,
         "top_class": result["top_class"] if result["is_confident"] else "Uncertain",
         "top_confidence": result["top_confidence"],
         "is_confident": result["is_confident"],

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import CATEGORY_GUIDANCE, GENERIC_GUIDANCE, config_manager
+from ai.live_decision import StableDecisionTracker
 from ui.theme import ThemeManager
 from ui.widgets import ScanZoneVideoWidget, ConfidenceProgressBar, CategoryGuidanceCard
 from ui.feedback import play_decision_buzzer
@@ -40,6 +41,10 @@ class LiveClassificationTab(QWidget):
         self.auto_candidate_class = None
         self.auto_candidate_count = 0
         self.auto_locked = False
+        self.decision_tracker = StableDecisionTracker(
+            threshold=config_manager.get("confidence_threshold", 70.0),
+            required_frames=config_manager.get("live_decision_frames", 3),
+        )
 
         self._build_ui()
         self._connect_signals()
@@ -335,28 +340,21 @@ class LiveClassificationTab(QWidget):
 
     def _process_auto_detection(self, result: dict):
         """Confirm one stable class, then keep that final decision on screen."""
-        top_class = result.get("top_class", "")
-        is_confident = result.get("is_confident", False)
-
-        if not is_confident:
+        snapshot = self.decision_tracker.update(result.get("smoothed_predictions", {}))
+        if not snapshot.is_confident:
             self.auto_candidate_class = None
             self.auto_candidate_count = 0
             self.update_prediction_ui(result)
             return
 
-        if top_class == self.auto_candidate_class:
-            self.auto_candidate_count += 1
-        else:
-            self.auto_candidate_class = top_class
-            self.auto_candidate_count = 1
-
-        required_frames = 3
-        if self.auto_candidate_count >= required_frames:
+        self.auto_candidate_class = snapshot.top_class
+        self.auto_candidate_count = snapshot.consecutive_frames
+        if snapshot.is_final:
             self.auto_locked = True
             play_decision_buzzer()
             self.update_prediction_ui(result, final_decision=True)
             self.manual_msg_label.setText(
-                f"Final Decision: {top_class} ({result.get('top_confidence', 0.0):.1f}% Confidence)"
+                f"Final Decision: {snapshot.top_class} ({snapshot.confidence:.1f}% Confidence)"
             )
             self.manual_status_card.setVisible(True)
         else:
@@ -436,6 +434,7 @@ class LiveClassificationTab(QWidget):
         self.auto_locked = False
         self.auto_candidate_class = None
         self.auto_candidate_count = 0
+        self.decision_tracker.reset()
         self.classifier.history_buffer.clear()
         self.manual_status_card.setVisible(False)
         self.radio_live.setChecked(True)
@@ -452,6 +451,7 @@ class LiveClassificationTab(QWidget):
             self.auto_locked = False
             self.auto_candidate_class = None
             self.auto_candidate_count = 0
+            self.decision_tracker.reset()
             self.classifier.history_buffer.clear()
             self.manual_status_card.setVisible(False)
             self.radio_live.setStyleSheet(f"font-weight: 700; color: {t['accent_primary']};")
@@ -462,6 +462,7 @@ class LiveClassificationTab(QWidget):
             self.auto_locked = False
             self.auto_candidate_class = None
             self.auto_candidate_count = 0
+            self.decision_tracker.reset()
             self.classifier.history_buffer.clear()
             self.radio_manual.setStyleSheet(f"font-weight: 700; color: {t['accent_primary']};")
             self.radio_live.setStyleSheet(f"font-weight: 700; color: {t['text_primary']};")

@@ -137,7 +137,19 @@ Add varied, clearly labeled photos to each folder, with the waste object visible
 python model/train_model.py --dataset dataset --epochs 25
 ```
 
-The script uses transfer learning with MobileNetV2, writes `model/keras_model.h5`, and keeps the class order synchronized with `model/labels.txt`.
+The script uses transfer learning with MobileNetV2, class-balanced training, and a conservative fine-tuning pass over the final backbone layers. It writes `model/keras_model.h5` and keeps the class order synchronized with `model/labels.txt`. Adjust the fine-tuning phase explicitly when needed:
+
+```bash
+python model/train_model.py --dataset dataset --epochs 25 --fine-tune-epochs 8 --fine-tune-layers 30
+```
+
+Measure class-specific performance on the deterministic held-out split before replacing the checked-in model:
+
+```bash
+python model/evaluate_model.py --dataset dataset --model model/keras_model.h5
+```
+
+The evaluator reports sample counts, precision, recall, F1, overall accuracy, and a confusion matrix. Confidence is not an accuracy guarantee; add varied examples for any class with weak recall, especially cans, glass, paper, batteries/e-waste, and non-bottle packaging.
 
 To create only a valid starter model for UI testing (not reliable classification):
 ```bash
@@ -148,6 +160,10 @@ python model/generate_sample_model.py
 ```bash
 python main.py
 ```
+
+In desktop **Live Auto-Detect** mode, inference runs on throttled camera frames. A class must remain at or above the configured 70% confidence threshold for three consecutive inference frames before the app commits a final bin decision. Confidence below the threshold, a class change, or resuming the camera resets the candidate.
+
+Press **SCIENCE FAIR MODE** to open the full-screen live display. It starts reading the already-running webcam automatically and does not require a photo scan. The display shows live probabilities, camera status, model status, and the final bin decision. A final decision activates the simulated category light state (blue Recyclable, yellow Dry Waste, green Wet Waste) and plays one non-blocking buzzer pulse; resetting or exiting clears the output state. The current repository has no physical GPIO, serial, USB, or Arduino sensor configuration, so the light and metal-detector indicators remain explicitly marked as simulation/not connected until a hardware adapter is configured.
 
 ## ☁️ Deploy the API on Render
 
@@ -183,6 +199,10 @@ Main file path: streamlit/app.py
 Streamlit installs the dependencies from `streamlit/requirements.txt`. The browser app sends images to the Render API at `https://ai-waste-doctor-api.onrender.com` and does not require the local desktop dependencies.
 
 After both services deploy, open the Streamlit URL and classify a test image. If the frontend reports that the API is unavailable, confirm the API `/health` endpoint returns `200`, verify the `AI_WASTE_API_URL` Streamlit variable has no trailing path, and check the Render logs for model loading errors.
+
+The **SCIENCE FAIR** tab uses `streamlit-webrtc` for continuous browser video and samples at most one frame per second through the API. Browser camera access requires HTTPS (localhost is also allowed) and permission to use the camera. Allow the WebRTC connection to start before expecting live probabilities. The app commits a final class only after three consecutive samples at or above 70%; it shows the current probabilities while waiting. If WebRTC cannot initialize, use the **LIVE CAMERA** tab for manual capture. Physical GPIO lights, buzzers, and metal sensors are not available to a hosted browser session; those outputs require the desktop app or a separate hardware bridge.
+
+Science Fair navigation is persistent across reruns. **SCAN NEXT OBJECT** clears the committed result and stale frame state inside the live fragment while keeping the WebRTC camera running; it does not navigate to Upload Image or require pressing a separate Start Camera button. The video control bar remains owned by the WebRTC component, and the result panel stops making API calls after a final decision until the next-object reset. The camera stops only when the operator stops it or exits the page.
 
 ---
 

@@ -43,7 +43,7 @@ class CameraWorker(QObject):
         self.camera_index = camera_index
         self.mirror = mirror
         self.show_fps = show_fps
-        self.scan_zone_ratio = scan_zone_ratio
+        self.scan_zone_ratio = max(0.2, min(float(scan_zone_ratio), 0.95))
         
         self.running = False
         self.cap = None
@@ -69,12 +69,8 @@ class CameraWorker(QObject):
 
                     h, w = frame.shape[:2]
 
-                    # Calculate scan zone rectangle (centered)
-                    box_w = int(w * self.scan_zone_ratio)
-                    box_h = int(h * self.scan_zone_ratio)
-                    box_x = (w - box_w) // 2
-                    box_y = (h - box_h) // 2
-                    scan_zone_box = (box_x, box_y, box_w, box_h)
+                    scan_zone_box = self.get_scan_zone(w, h)
+                    box_x, box_y, box_w, box_h = scan_zone_box
 
                     # Calculate real-time FPS
                     self.frame_count += 1
@@ -137,6 +133,13 @@ class CameraWorker(QObject):
 
         self._close_camera()
 
+    def get_scan_zone(self, width, height):
+        """Return a centered square scan zone for the camera frame."""
+        box_size = int(min(width, height) * self.scan_zone_ratio)
+        box_x = (width - box_size) // 2
+        box_y = (height - box_size) // 2
+        return box_x, box_y, box_size, box_size
+
     def _init_camera(self):
         """Attempt opening camera device."""
         if not CV2_AVAILABLE:
@@ -159,6 +162,7 @@ class CameraWorker(QObject):
                 # Set explicit resolution for stable capture
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+                self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 1)
                 # Warm up: discard first few frames (often garbled on Windows)
                 for _ in range(5):
                     self.cap.read()
@@ -209,11 +213,12 @@ class CameraManager(QObject):
 
     frame_signal = Signal(object, object, tuple, float, bool, str)
 
-    def __init__(self, camera_index=0, mirror=True, show_fps=True):
+    def __init__(self, camera_index=0, mirror=True, show_fps=True, scan_zone_ratio=0.6):
         super().__init__()
         self.camera_index = camera_index
         self.mirror = mirror
         self.show_fps = show_fps
+        self.scan_zone_ratio = scan_zone_ratio
         
         self.thread = None
         self.worker = None
@@ -227,7 +232,8 @@ class CameraManager(QObject):
         self.worker = CameraWorker(
             camera_index=self.camera_index,
             mirror=self.mirror,
-            show_fps=self.show_fps
+            show_fps=self.show_fps,
+            scan_zone_ratio=self.scan_zone_ratio
         )
         self.worker.moveToThread(self.thread)
 
@@ -263,3 +269,9 @@ class CameraManager(QObject):
         self.show_fps = show_fps
         if self.worker:
             self.worker.show_fps = show_fps
+
+    def set_scan_zone_ratio(self, ratio: float):
+        """Update the centered square scan-zone size."""
+        self.scan_zone_ratio = max(0.2, min(float(ratio), 0.95))
+        if self.worker:
+            self.worker.scan_zone_ratio = self.scan_zone_ratio

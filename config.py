@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "demo_mode": False,
     "scan_zone_ratio": 0.6,  # 60% of video height/width
     "inference_interval_frames": 5,  # Run AI inference every N frames (saves 80%+ CPU lag)
+    "live_decision_frames": 3,
     "default_scan_mode": "manual",  # "manual" (only scan when button pressed) or "live" (continuous)
     "theme": "dark"  # "dark" or "light"
 }
