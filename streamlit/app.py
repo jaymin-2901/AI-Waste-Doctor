@@ -19,7 +19,7 @@ from api_client import ClassificationError, classify_image
 from live_scan import LiveScanState, LiveVideoProcessor
 
 DEFAULT_API_URL = "https://ai-waste-doctor-api.onrender.com"
-EXPECTED_API_BUILD = "2026-10-01-semantic-food-guard-v1"
+EXPECTED_API_BUILD = "2026-10-01-object-centric-food-guard-v2"
 CATEGORY_COLORS = {
     "Recyclable": "#FBBF24",
     "Dry Waste": "#60A5FA",
@@ -378,6 +378,17 @@ def render_science_prediction(result, final_class):
     )
     if is_final:
         st.markdown(f'<div class="science-status">{CATEGORY_GUIDANCE.get(predicted, "Place this item in the designated sorting bin.")}</div>', unsafe_allow_html=True)
+
+    semantic_hint = result.get("semantic_hint") or {}
+    if result.get("semantic_guard_applied"):
+        semantic_label = semantic_hint.get("label") or "food / produce"
+        semantic_confidence = float(semantic_hint.get("confidence", 0.0))
+        produce_mass = float(semantic_hint.get("produce_mass", 0.0))
+        st.success(
+            f"FOOD CROSS-CHECK: {semantic_label} detected "
+            f"({semantic_confidence:.1f}% strongest cue · {produce_mass:.1f}% produce evidence)"
+        )
+
     st.markdown("<h4 style='color:#334155;margin:.8rem 0 .2rem'>CLASS CONFIDENCE PROBABILITIES</h4>", unsafe_allow_html=True)
     for category, color in CATEGORY_COLORS.items():
         value = max(0.0, min(100.0, float(predictions.get(category, 0.0))))
@@ -410,6 +421,15 @@ def render_prediction(result):
     if result_build != EXPECTED_API_BUILD:
         st.warning("The classification API is running an older model build. Redeploy the API before trusting this result.")
     st.caption(f"Model build: {result_build or 'not reported'}")
+
+    semantic_hint = result.get("semantic_hint") or {}
+    if result.get("semantic_guard_applied"):
+        semantic_label = semantic_hint.get("label") or "food / produce"
+        st.info(
+            f"Food cross-check corrected this result to Wet Waste · "
+            f"cue: {semantic_label} · "
+            f"produce evidence: {float(semantic_hint.get('produce_mass', 0.0)):.1f}%"
+        )
 
     st.markdown("#### CONFIDENCE BREAKDOWN")
     for category, color in CATEGORY_COLORS.items():
@@ -590,6 +610,9 @@ if active_view == navigation_options[4]:
                     st.caption(health_data.get("model_error") or health_data.get("model_status"))
             if health_data.get("build"):
                 st.caption(f"Model build: {health_data['build']}")
+            semantic_status = health_data.get("semantic_guard_status")
+            if semantic_status:
+                st.caption(f"Food cross-check: {semantic_status}")
         except ValueError:
             st.error(f"API returned a non-JSON response · HTTP {response.status_code}")
         except requests.RequestException as error:
