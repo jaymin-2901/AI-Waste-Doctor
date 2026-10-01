@@ -436,14 +436,14 @@ if active_view == navigation_options[2]:
                 )
             elif rtc_mode == "Open Relay TURN/TCP":
                 st.caption(
-                    "NETWORK: TURN relay over TCP/443 · zero-config fallback enabled"
+                    "NETWORK: TURN relay over TCP/443 · live preview enabled"
                 )
             else:
-                st.caption("NETWORK: Cloudflare TURN relay")
+                st.caption("NETWORK: Cloudflare TURN relay · live preview enabled")
 
             ctx = webrtc_streamer(
-                key="science-fair-camera-v2",
-                mode=WebRtcMode.SENDONLY,
+                key="science-fair-camera-v3",
+                mode=WebRtcMode.SENDRECV,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
                 media_stream_constraints={
@@ -466,6 +466,8 @@ if active_view == navigation_options[2]:
                         "objectFit": "contain",
                     },
                 },
+                sendback_video=True,
+                sendback_audio=False,
                 media_toggle_controls=False,
                 async_processing=True,
             )
