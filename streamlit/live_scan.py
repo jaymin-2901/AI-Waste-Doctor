@@ -1,13 +1,11 @@
-"""Browser live-video capture helpers for Streamlit Science Fair Mode."""
-
 import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Make repository root importable on Streamlit Cloud
 ROOT_DIR = Path(__file__).resolve().parent.parent
+
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -15,8 +13,10 @@ import av
 import cv2
 from streamlit_webrtc import VideoProcessorBase
 
-from ai.live_decision import DecisionSnapshot, StableDecisionTracker
-
+from ai.live_decision import (
+    DecisionSnapshot,
+    StableDecisionTracker,
+)
 
 @dataclass
 class LiveScanState:
