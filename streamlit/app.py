@@ -19,7 +19,7 @@ from api_client import ClassificationError, classify_image
 from live_scan import LiveScanState, LiveVideoProcessor
 
 DEFAULT_API_URL = "https://ai-waste-doctor-api.onrender.com"
-EXPECTED_API_BUILD = "2026-10-01-balanced-finetuned-square-crop"
+EXPECTED_API_BUILD = "2026-10-01-semantic-food-guard-v1"
 CATEGORY_COLORS = {
     "Recyclable": "#FBBF24",
     "Dry Waste": "#60A5FA",
