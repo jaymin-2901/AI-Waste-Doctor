@@ -338,7 +338,6 @@ if active_view == navigation_options[2]:
             ctx = webrtc_streamer(
                 key="science-fair-camera",
                 mode=WebRtcMode.SENDRECV,
-                desired_playing_state=True,
                 video_processor_factory=LiveVideoProcessor,
                 media_stream_constraints={
                     "video": {
