@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-# Add repository root to Python import path
+# Make repository root importable on Streamlit Cloud
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
@@ -23,38 +23,55 @@ class LiveScanState:
     """Own live inference state so a committed result cannot drift on reruns."""
 
     tracker: StableDecisionTracker = field(
-        default_factory=lambda: StableDecisionTracker(threshold=70.0, required_frames=3)
+        default_factory=lambda: StableDecisionTracker(
+            threshold=70.0,
+            required_frames=3,
+        )
     )
+
     latest_result: dict | None = None
     committed_result: dict | None = None
     committed_snapshot: DecisionSnapshot | None = None
 
     @property
     def final_class(self):
-        return self.committed_snapshot.top_class if self.committed_snapshot else None
+        return (
+            self.committed_snapshot.top_class
+            if self.committed_snapshot
+            else None
+        )
 
     def update(self, result: dict) -> DecisionSnapshot:
         """Accept a frame unless a final result has already been committed."""
+
         if self.committed_result is not None:
             return self.committed_snapshot
-        snapshot = self.tracker.update(result.get("predictions", {}))
+
+        snapshot = self.tracker.update(
+            result.get("predictions", {})
+        )
+
         self.latest_result = result
+
         if snapshot.is_final:
             self.committed_snapshot = snapshot
             self.committed_result = dict(result)
+
             self.committed_result.update(
                 top_class=snapshot.top_class,
                 top_confidence=round(snapshot.confidence, 1),
                 is_confident=True,
             )
+
         return snapshot
 
     def display_result(self):
-        """Return the committed result, or the latest live result."""
+        """Return committed result, or latest live result."""
         return self.committed_result or self.latest_result
 
     def reset(self) -> None:
-        """Clear the candidate, live result, and committed decision."""
+        """Clear candidate, live result, and committed decision."""
+
         self.tracker.reset()
         self.latest_result = None
         self.committed_result = None
@@ -62,24 +79,34 @@ class LiveScanState:
 
 
 class LiveVideoProcessor(VideoProcessorBase):
-    """Mirror the browser frame and retain the newest frame for throttled inference."""
+    """Receive browser camera frames and retain the newest frame."""
 
     def __init__(self):
         self._lock = threading.Lock()
+
         self._latest_frame = None
         self._latest_at = 0.0
+
         self._width = 0
         self._height = 0
         self._fps = 0.0
         self._previous_at = 0.0
 
     def recv(self, frame):
+        """Receive a frame from the browser camera."""
+
         image = frame.to_ndarray(format="bgr24")
+
         height, width = image.shape[:2]
+
+        # Scanning box
         box_size = int(min(width, height) * 0.6)
+
         left = (width - box_size) // 2
         top = (height - box_size) // 2
+
         displayed = image.copy()
+
         cv2.rectangle(
             displayed,
             (left, top),
@@ -87,26 +114,47 @@ class LiveVideoProcessor(VideoProcessorBase):
             (16, 185, 129),
             3,
         )
+
+        now = time.monotonic()
+
         with self._lock:
-            self._latest_frame = image
-            self._latest_at = time.monotonic()
+            self._latest_frame = image.copy()
+            self._latest_at = now
+
             self._width = width
             self._height = height
+
             if self._previous_at:
-                elapsed = self._latest_at - self._previous_at
+                elapsed = now - self._previous_at
+
                 if elapsed > 0:
                     self._fps = 1.0 / elapsed
-            self._previous_at = self._latest_at
-        return av.VideoFrame.from_ndarray(displayed, format="bgr24")
+
+            self._previous_at = now
+
+        return av.VideoFrame.from_ndarray(
+            displayed,
+            format="bgr24",
+        )
 
     def latest_frame(self):
-        """Return a copy of the newest frame and its monotonic timestamp."""
+        """Return newest camera frame and timestamp."""
+
         with self._lock:
             if self._latest_frame is None:
                 return None, 0.0
-            return self._latest_frame.copy(), self._latest_at
+
+            return (
+                self._latest_frame.copy(),
+                self._latest_at,
+            )
 
     def frame_info(self):
-        """Return the latest received width, height, and approximate FPS."""
+        """Return camera width, height and FPS."""
+
         with self._lock:
-            return self._width, self._height, self._fps
+            return (
+                self._width,
+                self._height,
+                self._fps,
+            )
