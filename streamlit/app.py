@@ -13,7 +13,6 @@ if str(ROOT_DIR) not in sys.path:
 import cv2
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 from api_client import ClassificationError, classify_image
@@ -146,10 +145,10 @@ def show_classification_error(error):
         st.code(error.technical)
 
 
-@st.fragment(run_every=1.0)
+@st.fragment(run_every=1.0, key="live-inference")
 def render_live_inference(ctx):
     """Sample the latest browser frame without blocking the video stream."""
-    if st.button("SCAN NEXT OBJECT", key="science_scan_next", use_container_width=True):
+    if st.button("SCAN NEXT OBJECT", key="science_scan_next", width="stretch"):
         st.session_state["live_scan_state"].reset()
         st.session_state["live_last_inference"] = 0.0
         st.session_state["live_last_frame_at"] = 0.0
@@ -289,8 +288,8 @@ if active_view == navigation_options[0]:
         st.markdown('<p class="panel-label">IMAGE SCAN</p>', unsafe_allow_html=True)
         uploaded_file = st.file_uploader("Choose a waste image", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed")
         if uploaded_file:
-            scan_clicked = st.button("CLASSIFY UPLOADED IMAGE", type="primary", use_container_width=True)
-            st.image(uploaded_file, caption="OBJECT READY FOR CLASSIFICATION", use_column_width=True)
+            scan_clicked = st.button("CLASSIFY UPLOADED IMAGE", type="primary", width="stretch")
+            st.image(uploaded_file, caption="OBJECT READY FOR CLASSIFICATION", width="stretch")
             if scan_clicked:
                 status_box = st.empty()
                 with st.spinner("Analyzing object..."):
@@ -311,7 +310,7 @@ if active_view == navigation_options[1]:
     with left:
         st.markdown('<p class="panel-label">CAMERA SCAN</p>', unsafe_allow_html=True)
         camera_file = st.camera_input("Capture a waste object", label_visibility="collapsed")
-        if camera_file and st.button("CLASSIFY CAPTURE", type="primary", use_container_width=True):
+        if camera_file and st.button("CLASSIFY CAPTURE", type="primary", width="stretch"):
             status_box = st.empty()
             with st.spinner("Analyzing captured object..."):
                 try:
@@ -333,9 +332,26 @@ if active_view == navigation_options[2]:
         unsafe_allow_html=True,
     )
     st.markdown('<p class="science-footer">Science Fair Live Mode · camera video is continuous · inference samples one frame per second</p>', unsafe_allow_html=True)
-    components.html(
-        """<button onclick="(() => { try { const root = window.parent.document.querySelector('[data-testid=stAppViewContainer]') || window.parent.document.documentElement; if (root.requestFullscreen) { root.requestFullscreen().catch(() => window.parent.alert('Fullscreen was blocked. Use browser fullscreen or allow fullscreen for this page.')); } } catch (error) { window.parent.alert('Fullscreen requires HTTPS or localhost and browser permission.'); } })()" style="padding:8px 14px;font-weight:700;cursor:pointer">ENTER FULL SCREEN</button>""",
-        height=42,
+    st.iframe(
+        """
+        <button
+          onclick="(() => {
+            try {
+              const root = window.parent.document.querySelector('[data-testid=stAppViewContainer]') || window.parent.document.documentElement;
+              if (root.requestFullscreen) {
+                root.requestFullscreen().catch(() =>
+                  window.parent.alert('Fullscreen was blocked. Use browser fullscreen or allow fullscreen for this page.')
+                );
+              }
+            } catch (error) {
+              window.parent.alert('Fullscreen requires HTTPS or localhost and browser permission.');
+            }
+          })()"
+          style="padding:8px 14px;font-weight:700;cursor:pointer;border-radius:8px;border:1px solid #6B9E2A;background:#343741;color:#B6FF2E"
+        >ENTER FULL SCREEN</button>
+        """,
+        height=55,
+        width=240,
     )
 
     left, right = st.columns([1.08, .92], gap="medium")
@@ -345,6 +361,11 @@ if active_view == navigation_options[2]:
             ctx = webrtc_streamer(
     key="science-fair-camera",
     mode=WebRtcMode.SENDRECV,
+    rtc_configuration={
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+        ]
+    },
     video_processor_factory=LiveVideoProcessor,
     media_stream_constraints={
         "video": {
