@@ -31,6 +31,76 @@ CATEGORY_GUIDANCE = {
     "Wet Waste": "GREEN COMPOST BIN · Food scraps and garden waste.",
 }
 
+
+def _get_secret(name: str):
+    """Read a deployment secret from env or Streamlit Community Cloud secrets."""
+    value = os.getenv(name)
+    if value:
+        return value.strip()
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return str(value).strip() if value else None
+
+
+@st.cache_data(ttl=3300, show_spinner=False)
+def get_rtc_configuration():
+    """Build a cloud-safe WebRTC ICE configuration.
+
+    Preferred path: Cloudflare Realtime TURN when credentials are present.
+    Zero-config fallback: Open Relay over TURN/TCP port 443 only. Using TCP/443
+    avoids the UDP/STUN path that is failing in the Streamlit Community Cloud
+    logs (aioice Transaction.__retry / datagram transport errors).
+    """
+    turn_key_id = _get_secret("CLOUDFLARE_TURN_KEY_ID")
+    turn_api_token = _get_secret("CLOUDFLARE_TURN_KEY_API_TOKEN")
+
+    if turn_key_id and turn_api_token:
+        try:
+            response = requests.post(
+                f"https://rtc.live.cloudflare.com/v1/turn/keys/{turn_key_id}/credentials/generate-ice-servers",
+                headers={
+                    "Authorization": f"Bearer {turn_api_token}",
+                    "User-Agent": "AI-Waste-Doctor/1.0 streamlit-webrtc",
+                },
+                json={"ttl": 7200},
+                timeout=12,
+            )
+            response.raise_for_status()
+            ice_servers = response.json().get("iceServers")
+            if ice_servers:
+                return {
+                    "iceServers": ice_servers,
+                    "iceTransportPolicy": "relay",
+                }, "Cloudflare TURN", None
+            return None, "Cloudflare TURN", "Cloudflare returned no ICE servers."
+        except (requests.RequestException, ValueError) as error:
+            return None, "Cloudflare TURN", f"{type(error).__name__}: {error}"
+
+    # Public Open Relay fallback. Force TURN over TCP/443 instead of UDP/STUN.
+    # This is intended as a zero-setup demo/science-fair fallback. For a
+    # permanent production deployment, configure Cloudflare TURN secrets.
+    return (
+        {
+            "iceServers": [
+                {
+                    "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+                    "username": "openrelayproject",
+                    "credential": "openrelayproject",
+                },
+                {
+                    "urls": ["turn:openrelay.metered.ca:80?transport=tcp"],
+                    "username": "openrelayproject",
+                    "credential": "openrelayproject",
+                },
+            ],
+            "iceTransportPolicy": "relay",
+        },
+        "Open Relay TURN/TCP",
+        None,
+    )
+
 st.set_page_config(
     page_title="AI Waste Doctor",
     page_icon="♻️",
@@ -358,36 +428,47 @@ if active_view == navigation_options[2]:
     with left:
         st.markdown('<p class="science-panel-title">LIVE CAMERA FEED</p>', unsafe_allow_html=True)
         try:
+            rtc_configuration, rtc_mode, rtc_error = get_rtc_configuration()
+            if rtc_error:
+                st.error(
+                    "TURN configuration failed. "
+                    f"{rtc_error}"
+                )
+            elif rtc_mode == "Open Relay TURN/TCP":
+                st.caption(
+                    "NETWORK: TURN relay over TCP/443 · zero-config fallback enabled"
+                )
+            else:
+                st.caption("NETWORK: Cloudflare TURN relay")
+
             ctx = webrtc_streamer(
-    key="science-fair-camera",
-    mode=WebRtcMode.SENDRECV,
-    rtc_configuration={
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-        ]
-    },
-    video_processor_factory=LiveVideoProcessor,
-    media_stream_constraints={
-        "video": {
-            "width": {"ideal": 1280, "min": 640},
-            "height": {"ideal": 720, "min": 480},
-            "frameRate": {"ideal": 30, "max": 30},
-        },
-        "audio": False,
-    },
-    video_html_attrs={
-        "controls": False,
-        "autoPlay": True,
-        "playsInline": True,
-        "muted": True,
-        "width": "100%",
-        "style": {
-            "width": "100%",
-            "height": "auto",
-            "objectFit": "contain",
-        },
-    },
-)
+                key="science-fair-camera-v2",
+                mode=WebRtcMode.SENDONLY,
+                rtc_configuration=rtc_configuration,
+                video_processor_factory=LiveVideoProcessor,
+                media_stream_constraints={
+                    "video": {
+                        "width": {"ideal": 640, "min": 320},
+                        "height": {"ideal": 480, "min": 240},
+                        "frameRate": {"ideal": 15, "max": 20},
+                    },
+                    "audio": False,
+                },
+                video_html_attrs={
+                    "controls": False,
+                    "autoPlay": True,
+                    "playsInline": True,
+                    "muted": True,
+                    "width": "100%",
+                    "style": {
+                        "width": "100%",
+                        "height": "auto",
+                        "objectFit": "contain",
+                    },
+                },
+                media_toggle_controls=False,
+                async_processing=True,
+            )
         except Exception as error:
             ctx = None
             st.warning("Live browser video is unavailable in this session. Use the LIVE CAMERA capture tab instead.")
@@ -397,7 +478,7 @@ if active_view == navigation_options[2]:
         if ctx is None or not ctx.state.playing:
             st.session_state["live_scan_state"].reset()
             st.markdown('<div class="science-decision uncertain"><h2>SCANNING OBJECT</h2><p>START CAMERA TO BEGIN</p></div>', unsafe_allow_html=True)
-            st.caption("Allow camera access to begin live detection.")
+            st.caption("Press START and allow camera access. The live stream uses TURN over TCP/443 on hosted deployments.")
         else:
             render_live_inference(ctx)
 
