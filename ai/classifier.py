@@ -1,15 +1,10 @@
-"""
-AI Waste Classifier module for AI Waste Doctor.
+"""AI Waste Doctor classification engine.
 
-Loads the trained 3-class waste classifier, performs inference and smoothing,
-and adds a conservative ImageNet semantic guard for obvious food / fruit items.
-
-Why the semantic guard exists:
-The custom 3-class model can occasionally classify a visually unfamiliar fruit
-as Dry Waste. A pretrained MobileNetV2 recognizer is used only as a second
-opinion for strongly recognizable food/produce classes. It does not replace the
-waste model and it fails open: if the auxiliary model cannot load, normal waste
-classification continues unchanged.
+The trained 3-class waste model remains the primary classifier.  A lightweight
+ImageNet MobileNetV2 cross-check is used only when the waste model predicts a
+non-wet class.  The cross-check is object-centric and evaluates several nested
+center crops so a fruit placed inside a bowl does not get lost in background or
+container pixels.
 """
 
 import os
@@ -21,7 +16,6 @@ import numpy as np
 
 from ai.preprocessing import preprocess_frame
 
-# Suppress TensorFlow C++ verbose log messages & oneDNN warnings.
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
@@ -41,57 +35,75 @@ except ImportError:
     TF_AVAILABLE = False
 
 
-# ImageNet names emitted by keras.applications.mobilenet_v2.decode_predictions().
-# These are deliberately conservative. We only use the auxiliary recognizer to
-# correct strong "obvious food / produce" cases into Wet Waste.
-WET_WASTE_IMAGENET_LABELS = {
-    "granny smith",
-    "strawberry",
-    "orange",
-    "lemon",
-    "fig",
-    "pineapple",
-    "banana",
-    "jackfruit",
-    "custard apple",
-    "pomegranate",
-    "acorn squash",
-    "butternut squash",
-    "spaghetti squash",
-    "artichoke",
-    "bell pepper",
-    "cardoon",
-    "mushroom",
-    "broccoli",
-    "cauliflower",
-    "zucchini",
-    "cucumber",
-    "head cabbage",
-    "corn",
-    "ear",
-    "guacamole",
-    "mashed potato",
-    "ice cream",
-    "pizza",
-    "cheeseburger",
-    "hotdog",
-    "pretzel",
-    "bagel",
-    "meat loaf",
-    "potpie",
-    "burrito",
+# Keras / ImageNet output indices.  The produce block is contiguous in the
+# canonical ImageNet-1K class ordering used by MobileNetV2.
+# 936..957 = head cabbage .. pomegranate.
+IMAGENET_WET_CLASS_MAP = {
+    924: "guacamole",
+    925: "consomme",
+    926: "hot pot",
+    927: "trifle",
+    928: "ice cream",
+    929: "ice lolly",
+    930: "French loaf",
+    931: "bagel",
+    932: "pretzel",
+    933: "cheeseburger",
+    934: "hotdog",
+    935: "mashed potato",
+    936: "head cabbage",
+    937: "broccoli",
+    938: "cauliflower",
+    939: "zucchini",
+    940: "spaghetti squash",
+    941: "acorn squash",
+    942: "butternut squash",
+    943: "cucumber",
+    944: "artichoke",
+    945: "bell pepper",
+    946: "cardoon",
+    947: "mushroom",
+    948: "Granny Smith apple",
+    949: "strawberry",
+    950: "orange",
+    951: "lemon",
+    952: "fig",
+    953: "pineapple",
+    954: "banana",
+    955: "jackfruit",
+    956: "custard apple",
+    957: "pomegranate",
+    959: "carbonara",
+    962: "meat loaf",
+    963: "pizza",
+    964: "potpie",
+    965: "burrito",
 }
+
+PRODUCE_INDICES = tuple(range(936, 958))
+COOKED_FOOD_INDICES = (
+    924,
+    925,
+    926,
+    927,
+    928,
+    929,
+    930,
+    931,
+    932,
+    933,
+    934,
+    935,
+    959,
+    962,
+    963,
+    964,
+    965,
+)
 
 
 class WasteClassifier:
-    """
-    Intelligent Waste Classification Engine.
-
-    The main prediction comes from model/keras_model.h5.  A pretrained
-    ImageNet MobileNetV2 model can act as a conservative semantic guard for
-    obvious food/produce objects (for example, an apple) that the 3-class model
-    would otherwise call Dry Waste.
-    """
+    """Three-class waste classifier with an object-centric food cross-check."""
 
     def __init__(
         self,
@@ -118,7 +130,6 @@ class WasteClassifier:
         self.status_message = "Initializing AI Classifier..."
         self.model_error = ""
 
-        # Auxiliary semantic recognizer.
         self.semantic_model = None
         self.semantic_guard_enabled = os.getenv(
             "AI_WASTE_SEMANTIC_GUARD", "1"
@@ -126,131 +137,84 @@ class WasteClassifier:
         self.semantic_status = "disabled"
         self.semantic_error = ""
 
-        # Stability / smoothing parameters.
         self.smoothing_frames = max(1, smoothing_frames)
-        self.confidence_threshold = confidence_threshold
+        self.confidence_threshold = float(confidence_threshold)
         self.history_buffer = deque(maxlen=self.smoothing_frames)
 
         self.load_labels()
         self.load_model()
 
-        # Load the auxiliary recognizer after the custom model.  This is
-        # intentionally non-fatal: classification still works if ImageNet
-        # weights cannot be downloaded/loaded on the deployment.
         if self.semantic_guard_enabled and TF_AVAILABLE:
             self.load_semantic_model()
 
     def set_smoothing_frames(self, frames: int):
-        """Update sliding window size for smoothing filter."""
-        self.smoothing_frames = max(1, frames)
+        self.smoothing_frames = max(1, int(frames))
         self.history_buffer = deque(maxlen=self.smoothing_frames)
 
     def set_confidence_threshold(self, threshold: float):
-        """Update confidence threshold percentage."""
-        self.confidence_threshold = threshold
+        self.confidence_threshold = float(threshold)
 
     def load_labels(self):
-        """Load class names from labels.txt."""
         if self.labels_path.exists():
             try:
-                with open(self.labels_path, "r", encoding="utf-8") as file:
-                    lines = [line.strip() for line in file.readlines() if line.strip()]
-
-                parsed_labels = []
+                lines = [
+                    line.strip()
+                    for line in self.labels_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                parsed = []
                 for line in lines:
                     parts = line.split(" ", 1)
-                    if len(parts) > 1 and parts[0].isdigit():
-                        parsed_labels.append(parts[1].strip())
-                    else:
-                        parsed_labels.append(line)
-
-                if parsed_labels:
-                    self.labels = parsed_labels
-                    print(
-                        f"[Classifier] Loaded {len(self.labels)} class labels: "
-                        f"{self.labels}"
+                    parsed.append(
+                        parts[1].strip()
+                        if len(parts) > 1 and parts[0].isdigit()
+                        else line
                     )
-                else:
-                    self.labels = ["Recyclable", "Dry Waste", "Wet Waste"]
+                self.labels = parsed or ["Recyclable", "Dry Waste", "Wet Waste"]
+                print(f"[Classifier] Loaded labels: {self.labels}")
+                return
             except Exception as error:
-                print(f"[Classifier] Error loading labels.txt: {error}")
-                self.labels = ["Recyclable", "Dry Waste", "Wet Waste"]
-        else:
-            print("[Classifier] labels.txt not found. Using default 3 categories.")
-            self.labels = ["Recyclable", "Dry Waste", "Wet Waste"]
+                print(f"[Classifier] Error loading labels: {error}")
+
+        self.labels = ["Recyclable", "Dry Waste", "Wet Waste"]
+        print("[Classifier] Using default labels.")
 
     def load_model(self):
-        """Load the trained Keras waste model."""
         if not TF_AVAILABLE:
             self.demo_mode = True
             self.status_message = "TensorFlow not installed. DEMO MODE ACTIVE."
-            print(f"[Classifier] {self.status_message}")
             return
 
-        model_loaded = False
         saved_model_dir = self.model_path.parent / "saved_model"
+        candidates = [self.model_path, saved_model_dir]
 
-        if self.model_path.exists():
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
             try:
-                self.model = tf.keras.models.load_model(
-                    str(self.model_path), compile=False
-                )
-                model_loaded = True
-                print(
-                    "[Classifier] Successfully loaded Keras model from: "
-                    f"{self.model_path}"
-                )
+                self.model = tf.keras.models.load_model(str(candidate), compile=False)
+                self.demo_mode = False
+                self.status_message = "AI Model Loaded Successfully."
+                print(f"[Classifier] Loaded waste model from {candidate}")
+                return
             except Exception as error:
                 self.model_error = str(error)
-                print(
-                    f"[Classifier] Error loading model file {self.model_path}: "
-                    f"{error}"
-                )
-        elif saved_model_dir.exists():
-            try:
-                self.model = tf.keras.models.load_model(
-                    str(saved_model_dir), compile=False
-                )
-                model_loaded = True
-                print(
-                    "[Classifier] Successfully loaded SavedModel from "
-                    f"{saved_model_dir}"
-                )
-            except Exception as error:
-                self.model_error = str(error)
-                print(
-                    "[Classifier] Error loading SavedModel from "
-                    f"{saved_model_dir}: {error}"
-                )
+                print(f"[Classifier] Failed to load {candidate}: {error}")
 
-        if model_loaded:
-            self.demo_mode = False
-            self.status_message = "AI Model Loaded Successfully."
-        else:
-            self.demo_mode = True
-            self.status_message = "MODEL NOT FOUND - Running in Demo Mode."
-            print(f"[Classifier] {self.status_message}")
+        self.demo_mode = True
+        self.status_message = "MODEL NOT FOUND - Running in Demo Mode."
 
     def load_semantic_model(self):
-        """
-        Load a pretrained ImageNet MobileNetV2 recognizer.
-
-        This model is a second opinion only.  Failure here never switches the
-        app into demo mode and never prevents the custom waste model from
-        serving predictions.
-        """
+        """Load a small pretrained ImageNet recognizer used as a second opinion."""
         if not self.semantic_guard_enabled:
             self.semantic_status = "disabled"
             return
-
         if not TF_AVAILABLE:
             self.semantic_status = "unavailable"
             self.semantic_error = "TensorFlow is not installed."
             return
 
         try:
-            # Keras downloads the standard ImageNet weights on first use and
-            # then keeps them in its local model cache.
             self.semantic_model = tf.keras.applications.MobileNetV2(
                 input_shape=(224, 224, 3),
                 include_top=True,
@@ -259,18 +223,14 @@ class WasteClassifier:
             )
             self.semantic_model.trainable = False
             self.semantic_status = "ready"
-            print("[Classifier] Semantic food guard loaded (ImageNet MobileNetV2).")
+            print("[Classifier] Object-centric ImageNet food guard is ready.")
         except Exception as error:
             self.semantic_model = None
             self.semantic_status = "unavailable"
             self.semantic_error = str(error)
-            print(
-                "[Classifier] Semantic food guard unavailable; continuing with "
-                f"the custom model only: {error}"
-            )
+            print(f"[Classifier] Food guard unavailable: {error}")
 
     def _wet_label_index(self):
-        """Return the output index that represents wet/organic waste."""
         for index, label in enumerate(self.labels):
             normalized = label.strip().lower()
             if normalized == "wet waste" or "organic" in normalized:
@@ -278,84 +238,200 @@ class WasteClassifier:
         return None
 
     @staticmethod
-    def _normalize_semantic_label(label: str) -> str:
-        return " ".join(label.replace("_", " ").strip().lower().split())
+    def _probability_row(values):
+        values = np.asarray(values, dtype=np.float32).reshape(-1)
+        if values.size == 0 or not np.all(np.isfinite(values)):
+            raise ValueError("Model returned invalid prediction values")
 
-    def _semantic_food_hint(self, batch_img):
-        """
-        Return an ImageNet food/produce hint or None.
+        if np.all(values >= 0) and np.isclose(float(values.sum()), 1.0, atol=1e-3):
+            return values
 
-        We inspect the top 5 predictions.  A hint is accepted only when the
-        recognizer has enough combined evidence for known food/produce labels.
-        """
+        shifted = values - np.max(values)
+        exp_values = np.exp(shifted)
+        return exp_values / np.sum(exp_values)
+
+    @staticmethod
+    def _scaled_crop_box(frame, crop_box, scale):
+        """Scale a crop around its own center while remaining inside the frame."""
+        height, width = frame.shape[:2]
+
+        if crop_box is None:
+            base_x, base_y, base_w, base_h = 0, 0, width, height
+        else:
+            base_x, base_y, base_w, base_h = crop_box
+
+        center_x = base_x + (base_w / 2.0)
+        center_y = base_y + (base_h / 2.0)
+        side = int(max(32, min(base_w, base_h) * float(scale)))
+        side = min(side, width, height)
+
+        x = int(round(center_x - side / 2.0))
+        y = int(round(center_y - side / 2.0))
+        x = max(0, min(x, width - side))
+        y = max(0, min(y, height - side))
+        return (x, y, side, side)
+
+    def _semantic_food_hint(self, frame, crop_box, base_probs):
+        """Evaluate food/produce evidence on several nested object-centric crops."""
         if self.semantic_model is None:
             return None
 
         try:
-            predictions = np.asarray(
-                self.semantic_model(batch_img, training=False).numpy(),
+            view_scales = (0.68, 0.84, 1.0)
+            batches = []
+            boxes = []
+            for scale in view_scales:
+                box = self._scaled_crop_box(frame, crop_box, scale)
+                batch, _ = preprocess_frame(
+                    frame,
+                    target_size=(224, 224),
+                    normalization_mode="-1_to_1",
+                    crop_box=box,
+                )
+                batches.append(batch[0])
+                boxes.append(box)
+
+            semantic_batch = np.stack(batches, axis=0).astype(np.float32)
+            outputs = np.asarray(
+                self.semantic_model(semantic_batch, training=False).numpy(),
                 dtype=np.float32,
             )
-            decoded = tf.keras.applications.mobilenet_v2.decode_predictions(
-                predictions, top=5
-            )[0]
+            if outputs.ndim != 2 or outputs.shape[1] < 966:
+                raise ValueError(f"Unexpected semantic output shape: {outputs.shape}")
         except Exception as error:
-            # Do not fail the main classifier because of the auxiliary model.
             self.semantic_error = str(error)
-            print(f"[Classifier] Semantic guard inference skipped: {error}")
+            print(f"[Classifier] Semantic inference skipped: {error}")
             return None
 
-        matched = []
-        top5 = []
+        wet_index = self._wet_label_index()
+        base_wet = float(base_probs[wet_index]) if wet_index is not None else 0.0
 
-        for class_id, class_name, score in decoded:
-            normalized_name = self._normalize_semantic_label(class_name)
-            score = float(score)
-            top5.append(
+        view_details = []
+        best_produce_candidate = None
+        best_produce_score = 0.0
+        best_food_candidate = None
+        best_food_score = 0.0
+        max_produce_mass = 0.0
+        max_food_mass = 0.0
+        produce_supporting_views = 0
+        food_supporting_views = 0
+
+        for view_index, row in enumerate(outputs):
+            produce_mass = float(np.sum(row[list(PRODUCE_INDICES)]))
+            food_mass = float(
+                np.sum(row[list(PRODUCE_INDICES)])
+                + np.sum(row[list(COOKED_FOOD_INDICES)])
+            )
+
+            produce_scores = [
+                (index, float(row[index])) for index in PRODUCE_INDICES
+            ]
+            cooked_scores = [
+                (index, float(row[index])) for index in COOKED_FOOD_INDICES
+            ]
+            local_produce_index, local_produce_score = max(
+                produce_scores,
+                key=lambda item: item[1],
+            )
+            local_food_index, local_food_score = max(
+                cooked_scores,
+                key=lambda item: item[1],
+            )
+
+            if local_produce_score > best_produce_score:
+                best_produce_score = local_produce_score
+                best_produce_candidate = local_produce_index
+            if local_food_score > best_food_score:
+                best_food_score = local_food_score
+                best_food_candidate = local_food_index
+
+            max_produce_mass = max(max_produce_mass, produce_mass)
+            max_food_mass = max(max_food_mass, food_mass)
+            if produce_mass >= 0.045:
+                produce_supporting_views += 1
+            if food_mass >= 0.08:
+                food_supporting_views += 1
+
+            top_produce = sorted(
+                produce_scores,
+                key=lambda item: item[1],
+                reverse=True,
+            )[:3]
+            view_details.append(
                 {
-                    "id": class_id,
-                    "label": normalized_name,
-                    "confidence": round(score * 100.0, 1),
+                    "scale": view_scales[view_index],
+                    "crop_box": boxes[view_index],
+                    "produce_mass": round(produce_mass * 100.0, 1),
+                    "food_mass": round(food_mass * 100.0, 1),
+                    "top_produce": [
+                        {
+                            "label": IMAGENET_WET_CLASS_MAP[index],
+                            "confidence": round(score * 100.0, 1),
+                        }
+                        for index, score in top_produce
+                    ],
                 }
             )
-            if normalized_name in WET_WASTE_IMAGENET_LABELS:
-                matched.append((normalized_name, score))
 
-        if not matched:
-            return {
-                "matched": False,
-                "category": None,
-                "label": None,
-                "confidence": 0.0,
-                "aggregate_confidence": 0.0,
-                "top5": top5,
-            }
+        produce_match = bool(
+            best_produce_candidate is not None
+            and (
+                best_produce_score >= 0.060
+                or (
+                    best_produce_score >= 0.015
+                    and max_produce_mass >= 0.080
+                    and base_wet >= 0.08
+                )
+                or (
+                    best_produce_score >= 0.010
+                    and max_produce_mass >= 0.050
+                    and produce_supporting_views >= 2
+                    and base_wet >= 0.10
+                )
+            )
+        )
 
-        best_label, best_score = max(matched, key=lambda item: item[1])
-        aggregate = min(1.0, sum(score for _, score in matched))
+        # Cooked-food recognition is intentionally stricter than produce so a
+        # printed pizza/burger image on packaging does not easily become Wet Waste.
+        cooked_food_match = bool(
+            best_food_candidate is not None
+            and (
+                best_food_score >= 0.14
+                or (
+                    best_food_score >= 0.065
+                    and max_food_mass >= 0.16
+                    and food_supporting_views >= 2
+                    and base_wet >= 0.14
+                )
+            )
+        )
 
-        # Conservative acceptance gate:
-        # - at least one mapped food/produce label must have 18% probability
-        # - mapped food/produce candidates together must reach at least 25%
-        # This prevents the semantic model from overriding the waste model on
-        # weak, noisy labels.
-        accepted = best_score >= 0.18 and aggregate >= 0.25
+        best_candidate = (
+            best_produce_candidate if produce_match else best_food_candidate
+        )
+        best_candidate_score = (
+            best_produce_score if produce_match else best_food_score
+        )
+        best_label = (
+            IMAGENET_WET_CLASS_MAP.get(best_candidate)
+            if best_candidate is not None
+            else None
+        )
 
+        matched = produce_match or cooked_food_match
         return {
-            "matched": accepted,
-            "category": "Wet Waste" if accepted else None,
+            "matched": matched,
+            "category": "Wet Waste" if matched else None,
             "label": best_label,
-            "confidence": round(best_score * 100.0, 1),
-            "aggregate_confidence": round(aggregate * 100.0, 1),
-            "top5": top5,
+            "confidence": round(best_candidate_score * 100.0, 1),
+            "produce_mass": round(max_produce_mass * 100.0, 1),
+            "food_mass": round(max_food_mass * 100.0, 1),
+            "supporting_views": produce_supporting_views if produce_match else food_supporting_views,
+            "base_wet_confidence": round(base_wet * 100.0, 1),
+            "views": view_details,
         }
 
     def _apply_semantic_food_guard(self, raw_probs, hint):
-        """
-        Fuse a trusted food/produce hint into the 3-class waste probabilities.
-
-        Returns (new_probs, applied).
-        """
         if not hint or not hint.get("matched"):
             return raw_probs, False
 
@@ -364,15 +440,17 @@ class WasteClassifier:
             return raw_probs, False
 
         probs = np.asarray(raw_probs, dtype=np.float32)
-        aggregate = float(hint.get("aggregate_confidence", 0.0)) / 100.0
+        evidence = max(
+            float(hint.get("confidence", 0.0)) / 100.0,
+            float(hint.get("produce_mass", 0.0)) / 100.0,
+        )
+        base_wet = float(hint.get("base_wet_confidence", 0.0)) / 100.0
 
-        # Give obvious food/produce a decisive but not absolute wet-waste vote.
-        target_wet = min(0.97, max(0.82, 0.72 + 0.35 * aggregate))
+        target_wet = min(0.94, max(0.78, 0.72 + 0.45 * evidence + 0.25 * base_wet))
         remaining = 1.0 - target_wet
 
         other_indices = [index for index in range(len(probs)) if index != wet_index]
         other_total = float(sum(probs[index] for index in other_indices))
-
         if other_total > 0:
             for index in other_indices:
                 probs[index] = (probs[index] / other_total) * remaining
@@ -386,14 +464,7 @@ class WasteClassifier:
         return probs.tolist(), True
 
     def predict(self, frame, crop_box=None, normalization_mode="-1_to_1"):
-        """
-        Perform AI classification on an input frame.
-
-        Returns a dictionary containing raw/smoothed class probabilities,
-        confidence status, and optional semantic-guard diagnostics.
-        """
         num_classes = len(self.labels)
-        batch_img = None
         semantic_hint = None
         semantic_applied = False
 
@@ -407,56 +478,41 @@ class WasteClassifier:
                     normalization_mode=normalization_mode,
                     crop_box=crop_box,
                 )
-
-                preds = np.asarray(
+                model_output = np.asarray(
                     self.model(batch_img, training=False)[0].numpy(),
                     dtype=np.float32,
                 )
-
-                if preds.ndim != 1 or not np.all(np.isfinite(preds)):
-                    raise ValueError("Model returned invalid prediction values")
-
-                if len(preds) != num_classes:
+                if model_output.size != num_classes:
                     raise ValueError(
-                        f"Model output has {len(preds)} classes, but labels.txt "
-                        f"has {num_classes}"
+                        f"Model output has {model_output.size} classes, but labels.txt has {num_classes}"
                     )
+                raw_probs = self._probability_row(model_output).tolist()
 
-                if np.all(preds >= 0) and np.isclose(
-                    np.sum(preds), 1.0, atol=1e-3
-                ):
-                    raw_probs = preds.tolist()
-                else:
-                    shifted = preds - np.max(preds)
-                    exp_preds = np.exp(shifted)
-                    raw_probs = (exp_preds / np.sum(exp_preds)).tolist()
-
-                # Run the semantic guard only when the custom classifier is not
-                # already calling the item Wet Waste.  This keeps normal wet
-                # predictions fast while correcting obvious food false negatives.
                 base_top_index = int(np.argmax(raw_probs))
                 base_top_label = self.labels[base_top_index].strip().lower()
                 if (
-                    batch_img is not None
-                    and self.semantic_model is not None
+                    self.semantic_model is not None
                     and base_top_label != "wet waste"
                     and "organic" not in base_top_label
                 ):
-                    semantic_hint = self._semantic_food_hint(batch_img)
-                    raw_probs, semantic_applied = self._apply_semantic_food_guard(
-                        raw_probs, semantic_hint
+                    semantic_hint = self._semantic_food_hint(
+                        frame,
+                        crop_box,
+                        raw_probs,
                     )
-
+                    raw_probs, semantic_applied = self._apply_semantic_food_guard(
+                        raw_probs,
+                        semantic_hint,
+                    )
             except Exception as error:
-                print(
-                    f"[Classifier] Inference error: {error}. "
-                    "Falling back to demo mode for this prediction."
-                )
+                print(f"[Classifier] Inference error: {error}")
                 raw_probs = self._generate_demo_predictions()
 
         self.history_buffer.append(raw_probs)
-        buffer_array = np.array(self.history_buffer, dtype=np.float32)
-        smoothed_probs = np.mean(buffer_array, axis=0)
+        smoothed_probs = np.mean(
+            np.asarray(self.history_buffer, dtype=np.float32),
+            axis=0,
+        )
 
         raw_dict = {
             label: float(raw_probs[index] * 100.0)
@@ -475,8 +531,8 @@ class WasteClassifier:
         status = "OK" if is_confident else "UNCERTAIN – MOVE OBJECT CLOSER"
         if semantic_applied and semantic_hint:
             status = (
-                "OK · SEMANTIC FOOD GUARD: "
-                f"{semantic_hint.get('label', 'food')} → Wet Waste"
+                "OK · FOOD CROSS-CHECK: "
+                f"{semantic_hint.get('label') or 'food/produce'} → Wet Waste"
             )
 
         return {
@@ -489,17 +545,15 @@ class WasteClassifier:
             "demo_mode": self.demo_mode,
             "semantic_guard_applied": semantic_applied,
             "semantic_hint": semantic_hint,
+            "semantic_guard_status": self.semantic_status,
         }
 
     def _generate_demo_predictions(self):
-        """Generate a realistic simulated probability distribution in demo mode."""
         num_classes = len(self.labels)
-
         if not hasattr(self, "_demo_dominant_idx") or random.random() < 0.1:
             self._demo_dominant_idx = random.randint(0, num_classes - 1)
 
         probs = [random.uniform(0.02, 0.15) for _ in range(num_classes)]
         probs[self._demo_dominant_idx] = random.uniform(0.75, 0.96)
-
         total = sum(probs)
         return [probability / total for probability in probs]
