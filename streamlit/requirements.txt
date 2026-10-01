@@ -1,4 +1,7 @@
-streamlit>=1.51.0
+streamlit==1.63.0
 requests==2.32.3
-streamlit-webrtc>=0.78.1
+streamlit-webrtc==0.78.1
+aiortc==1.15.0
+aioice==0.10.2
 opencv-python-headless==4.10.0.84
+
