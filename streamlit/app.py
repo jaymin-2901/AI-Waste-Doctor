@@ -343,31 +343,30 @@ if active_view == navigation_options[2]:
         st.markdown('<p class="science-panel-title">LIVE CAMERA FEED</p>', unsafe_allow_html=True)
         try:
             ctx = webrtc_streamer(
-                key="science-fair-camera",
-                mode=WebRtcMode.SENDRECV,
-                video_processor_factory=LiveVideoProcessor,
-                media_stream_constraints={
-                    "video": {
-                        "width": {"ideal": 1280, "min": 640},
-                        "height": {"ideal": 720, "min": 480},
-                        "frameRate": {"ideal": 30, "max": 30},
-                    },
-                    "audio": False,
-                },
-                rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
-                video_html_attrs={
-                    "controls": False,
-                    "autoPlay": True,
-                    "playsInline": True,
-                    "muted": True,
-                    "width": "100%",
-                    "style": {
-                              "width": "100%",
-                              "height": "auto",
-                              "objectFit": "contain",
-                             },
-                    },
-                )
+    key="science-fair-camera",
+    mode=WebRtcMode.SENDRECV,
+    video_processor_factory=LiveVideoProcessor,
+    media_stream_constraints={
+        "video": {
+            "width": {"ideal": 1280, "min": 640},
+            "height": {"ideal": 720, "min": 480},
+            "frameRate": {"ideal": 30, "max": 30},
+        },
+        "audio": False,
+    },
+    video_html_attrs={
+        "controls": False,
+        "autoPlay": True,
+        "playsInline": True,
+        "muted": True,
+        "width": "100%",
+        "style": {
+            "width": "100%",
+            "height": "auto",
+            "objectFit": "contain",
+        },
+    },
+)
         except Exception as error:
             ctx = None
             st.warning("Live browser video is unavailable in this session. Use the LIVE CAMERA capture tab instead.")
