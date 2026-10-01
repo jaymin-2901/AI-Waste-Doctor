@@ -14,7 +14,7 @@ import cv2
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_webrtc import RTCConfiguration, WebRtcMode, webrtc_streamer
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 from api_client import ClassificationError, classify_image
 from live_scan import LiveScanState, LiveVideoProcessor
@@ -348,8 +348,8 @@ if active_view == navigation_options[2]:
                 video_processor_factory=LiveVideoProcessor,
                 media_stream_constraints={
                     "video": {
-                        "width": {"ideal": 1920, "min": 1280},
-                        "height": {"ideal": 1080, "min": 720},
+                        "width": {"ideal": 1280, "min": 640},
+                        "height": {"ideal": 720, "min": 480},
                         "frameRate": {"ideal": 30, "max": 30},
                     },
                     "audio": False,
@@ -361,9 +361,13 @@ if active_view == navigation_options[2]:
                     "playsInline": True,
                     "muted": True,
                     "width": "100%",
-                    "style": {"width": "100%", "height": "auto", "objectFit": "contain"},
-                },
-            )
+                    "style": {
+                              "width": "100%",
+                              "height": "auto",
+                              "objectFit": "contain",
+                             },
+                    },
+                )
         except Exception as error:
             ctx = None
             st.warning("Live browser video is unavailable in this session. Use the LIVE CAMERA capture tab instead.")
