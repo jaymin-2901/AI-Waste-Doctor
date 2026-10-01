@@ -44,15 +44,52 @@ def _get_secret(name: str):
     return str(value).strip() if value else None
 
 
+def _tcp_turn_only(ice_servers):
+    """Keep TURN/TCP/TLS URLs only and discard STUN/UDP candidates.
+
+    Cloudflare returns STUN plus TURN/UDP/TCP/TLS endpoints. The Streamlit
+    deployment has repeatedly shown aioice UDP datagram shutdown failures, so
+    this app deliberately negotiates relay candidates over TCP only.
+    """
+    filtered = []
+    preferred_order = (
+        "turns:turn.cloudflare.com:443?transport=tcp",
+        "turns:turn.cloudflare.com:5349?transport=tcp",
+        "turn:turn.cloudflare.com:80?transport=tcp",
+        "turn:turn.cloudflare.com:3478?transport=tcp",
+    )
+
+    for server in ice_servers or []:
+        if not isinstance(server, dict):
+            continue
+        urls = server.get("urls", [])
+        if isinstance(urls, str):
+            urls = [urls]
+        tcp_urls = [
+            url
+            for url in urls
+            if isinstance(url, str)
+            and url.startswith(("turn:", "turns:"))
+            and "transport=tcp" in url
+        ]
+        if not tcp_urls:
+            continue
+
+        ordered = [url for wanted in preferred_order for url in tcp_urls if url == wanted]
+        ordered.extend(url for url in tcp_urls if url not in ordered)
+        item = {"urls": ordered}
+        if server.get("username"):
+            item["username"] = server["username"]
+        if server.get("credential"):
+            item["credential"] = server["credential"]
+        filtered.append(item)
+
+    return filtered
+
+
 @st.cache_data(ttl=3300, show_spinner=False)
 def get_rtc_configuration():
-    """Build a cloud-safe WebRTC ICE configuration.
-
-    Preferred path: Cloudflare Realtime TURN when credentials are present.
-    Zero-config fallback: Open Relay over TURN/TCP port 443 only. Using TCP/443
-    avoids the UDP/STUN path that is failing in the Streamlit Community Cloud
-    logs (aioice Transaction.__retry / datagram transport errors).
-    """
+    """Build a relay-only WebRTC configuration that avoids UDP/STUN."""
     turn_key_id = _get_secret("CLOUDFLARE_TURN_KEY_ID")
     turn_api_token = _get_secret("CLOUDFLARE_TURN_KEY_API_TOKEN")
 
@@ -68,32 +105,29 @@ def get_rtc_configuration():
                 timeout=12,
             )
             response.raise_for_status()
-            ice_servers = response.json().get("iceServers")
+            ice_servers = _tcp_turn_only(response.json().get("iceServers"))
             if ice_servers:
                 return {
                     "iceServers": ice_servers,
                     "iceTransportPolicy": "relay",
-                }, "Cloudflare TURN", None
-            return None, "Cloudflare TURN", "Cloudflare returned no ICE servers."
+                }, "Cloudflare TURN/TCP", None
+            return None, "Cloudflare TURN/TCP", "Cloudflare returned no usable TURN/TCP servers."
         except (requests.RequestException, ValueError) as error:
-            return None, "Cloudflare TURN", f"{type(error).__name__}: {error}"
+            return None, "Cloudflare TURN/TCP", f"{type(error).__name__}: {error}"
 
-    # Public Open Relay fallback. Force TURN over TCP/443 instead of UDP/STUN.
-    # This is intended as a zero-setup demo/science-fair fallback. For a
-    # permanent production deployment, configure Cloudflare TURN secrets.
+    # Public fallback for testing. The science-fair deployment should normally
+    # use Cloudflare TURN secrets, but this keeps the app usable without them.
     return (
         {
             "iceServers": [
                 {
-                    "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
+                    "urls": [
+                        "turn:openrelay.metered.ca:443?transport=tcp",
+                        "turn:openrelay.metered.ca:80?transport=tcp",
+                    ],
                     "username": "openrelayproject",
                     "credential": "openrelayproject",
-                },
-                {
-                    "urls": ["turn:openrelay.metered.ca:80?transport=tcp"],
-                    "username": "openrelayproject",
-                    "credential": "openrelayproject",
-                },
+                }
             ],
             "iceTransportPolicy": "relay",
         },
@@ -155,7 +189,10 @@ st.markdown(
     body:has([data-testid="stAppViewContainer"]:fullscreen) {
         background: #23262F !important;
     }
-    iframe[src*="streamlit_webrtc"] { width: 100% !important; min-width: 100% !important; height: auto !important; aspect-ratio: 16 / 9; display: block; border: 0; background: #0F131D; }
+    /* In SENDONLY mode the component's video area is intentionally not used.
+       Keep only a compact strip for START/STOP and device controls; the actual
+       preview is rendered below from frames received by the Python processor. */
+    iframe[src*="streamlit_webrtc"] { width: 100% !important; min-width: 100% !important; height: 145px !important; min-height: 145px !important; aspect-ratio: auto !important; display: block; border: 0; background: #0F131D; }
     [data-testid="column"]:has(iframe[src*="streamlit_webrtc"]) { min-width: 0 !important; width: 100% !important; }
     </style>
     """,
@@ -213,6 +250,47 @@ def show_classification_error(error):
     st.error(error.user_message)
     with st.expander("Technical details"):
         st.code(error.technical)
+
+
+
+
+@st.fragment(run_every=0.25, key="live-preview")
+def render_live_preview(ctx):
+    """Render the newest received camera frame without sending video back over WebRTC."""
+    processor = ctx.video_processor if ctx is not None else None
+    if processor is None:
+        st.info("Start the camera to display the live preview.")
+        return
+
+    frame, _ = processor.latest_frame()
+    if frame is None:
+        st.caption("Waiting for the first camera frame...")
+        return
+
+    preview = frame.copy()
+    height, width = preview.shape[:2]
+    box_size = int(min(width, height) * 0.6)
+    left = (width - box_size) // 2
+    top = (height - box_size) // 2
+    cv2.rectangle(
+        preview,
+        (left, top),
+        (left + box_size, top + box_size),
+        (16, 185, 129),
+        3,
+    )
+    cv2.putText(
+        preview,
+        "PLACE ONE OBJECT INSIDE THE BOX",
+        (max(12, left), max(28, top - 12)),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.55,
+        (16, 185, 129),
+        2,
+        cv2.LINE_AA,
+    )
+    preview = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+    st.image(preview, channels="RGB", width="stretch")
 
 
 @st.fragment(run_every=1.0, key="live-inference")
@@ -436,14 +514,14 @@ if active_view == navigation_options[2]:
                 )
             elif rtc_mode == "Open Relay TURN/TCP":
                 st.caption(
-                    "NETWORK: TURN relay over TCP/443 · live preview enabled"
+                    "NETWORK: TURN relay over TCP · one-way camera transport"
                 )
             else:
-                st.caption("NETWORK: Cloudflare TURN relay · live preview enabled")
+                st.caption("NETWORK: Cloudflare TURN/TCP relay · one-way camera transport")
 
             ctx = webrtc_streamer(
-                key="science-fair-camera-v3",
-                mode=WebRtcMode.SENDRECV,
+                key="science-fair-camera-v4-sendonly",
+                mode=WebRtcMode.SENDONLY,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
                 media_stream_constraints={
@@ -454,23 +532,15 @@ if active_view == navigation_options[2]:
                     },
                     "audio": False,
                 },
-                video_html_attrs={
-                    "controls": False,
-                    "autoPlay": True,
-                    "playsInline": True,
-                    "muted": True,
-                    "width": "100%",
-                    "style": {
-                        "width": "100%",
-                        "height": "auto",
-                        "objectFit": "contain",
-                    },
-                },
-                sendback_video=True,
                 sendback_audio=False,
                 media_toggle_controls=False,
                 async_processing=True,
             )
+
+            if ctx is not None and ctx.state.playing:
+                render_live_preview(ctx)
+            else:
+                st.caption("Press START, choose a camera if needed, and allow browser camera permission.")
         except Exception as error:
             ctx = None
             st.warning("Live browser video is unavailable in this session. Use the LIVE CAMERA capture tab instead.")
