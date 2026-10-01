@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from typing import Mapping, Optional
 
-
 @dataclass(frozen=True)
 class DecisionSnapshot:
     """Current live candidate and whether it is ready to be committed."""
