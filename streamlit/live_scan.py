@@ -38,7 +38,7 @@ class LiveScanState:
         )
 
     def update(self, result: dict) -> DecisionSnapshot:
-        """Accept the first valid trained-model prediction as the final decision."""
+        """Require >=70% confidence and stable consecutive frames before finalizing."""
         if self.committed_result is not None:
             return self.committed_snapshot
 
@@ -46,28 +46,20 @@ class LiveScanState:
         self.latest_result = result
 
         if not predictions:
+            self.tracker.reset()
             return DecisionSnapshot("", 0.0, 0, False, False)
 
-        top_class, confidence = max(
-            predictions.items(),
-            key=lambda item: float(item[1]),
-        )
-        confidence = float(confidence)
+        snapshot = self.tracker.update(predictions)
 
-        snapshot = DecisionSnapshot(
-            top_class=str(top_class),
-            confidence=confidence,
-            consecutive_frames=1,
-            is_confident=confidence >= 70.0,
-            is_final=True,
-        )
-        self.committed_snapshot = snapshot
-        self.committed_result = dict(result)
-        self.committed_result.update(
-            top_class=snapshot.top_class,
-            top_confidence=round(snapshot.confidence, 1),
-            is_confident=snapshot.is_confident,
-        )
+        if snapshot.is_final:
+            self.committed_snapshot = snapshot
+            self.committed_result = dict(result)
+            self.committed_result.update(
+                top_class=snapshot.top_class,
+                top_confidence=round(snapshot.confidence, 1),
+                is_confident=True,
+            )
+
         return snapshot
 
     def display_result(self):
