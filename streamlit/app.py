@@ -328,188 +328,144 @@ def _scene_change_score(reference_frame, current_frame):
 
 
 def render_live_inference(ctx):
-    """Continuously classify the camera object and automatically re-arm."""
+    """Run one automatic live-scan cycle; reruns keep the camera alive."""
     processor = ctx.video_processor if ctx is not None else None
     if processor is None:
         st.info("Start the camera once to begin automatic live detection.")
         return
 
     live_state = st.session_state["live_scan_state"]
-
-    # Normal Streamlit polling is used intentionally. No fragment callbacks
-    # are used, avoiding the stale WebRTC/session-state callback race.
-    last_inference = 0.0
-    last_frame_at = 0.0
-    error_until = 0.0
-    service_checked = False
-    last_result_signature = None
-
-    decision_reference = None
-    decision_locked_at = 0.0
-    scene_change_hits = 0
-    settle_until = time.monotonic() + LIVE_INITIAL_SETTLE_SECONDS
+    frame, captured_at = processor.latest_frame()
+    width, height, camera_fps = processor.frame_info()
 
     result_slot = st.empty()
     status_slot = st.empty()
     meta_slot = st.empty()
     preview_slot = st.empty()
 
-    while ctx.state.playing:
-        now = time.monotonic()
-        frame, captured_at = processor.latest_frame()
-        width, height, camera_fps = processor.frame_info()
+    if width and height:
+        meta_slot.caption(
+            f"CAMERA: {width}×{height} · {camera_fps:.1f} FPS · "
+            + ("FINAL DECISION" if live_state.committed_result is not None else "AUTOMATIC AI SCANNING")
+        )
 
-        if width and height:
-            mode = (
-                "WATCHING FOR NEXT OBJECT"
-                if live_state.committed_result is not None
-                else "AUTOMATIC AI SCANNING"
+    if frame is not None:
+        preview_slot.image(
+            cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+            channels="RGB",
+            width="stretch",
+            caption="Automatic live scan · keep one object inside the green box",
+        )
+
+    # A final result stays locked until Resume Scan is pressed.
+    if live_state.committed_result is not None:
+        final = live_state.committed_result
+        confidence = float(final.get("top_confidence", 0.0))
+        confidence_text = f"{confidence:.1f}%"
+
+        result_slot.markdown(
+            f'''
+            <div class="science-decision confident">
+                <h2>FINAL DECISION</h2>
+                <div style="font-size:2rem;font-weight:800;margin:.4rem 0">
+                    {final.get("top_class", "Unknown")}
+                </div>
+                <p>MODEL CONFIDENCE · {confidence_text}</p>
+            </div>
+            ''',
+            unsafe_allow_html=True,
+        )
+
+        if confidence < 70.0:
+            status_slot.warning(
+                f"FINAL DECISION · {confidence_text} confidence. "
+                "The trained model prediction has been accepted as final."
             )
-            meta_slot.caption(
-                f"CAMERA: {width}×{height} · {camera_fps:.1f} FPS · {mode}"
+        else:
+            status_slot.success(
+                f"FINAL DECISION · {final.get('top_class', 'Unknown')} · {confidence_text}"
             )
 
-        if frame is not None:
-            preview_slot.image(
-                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                channels="RGB",
-                width="stretch",
-                caption="Automatic live scan · keep one object inside the green box",
-            )
-
-        if live_state.committed_result is not None:
-            if decision_reference is None and frame is not None:
-                decision_reference = frame.copy()
-                decision_locked_at = now
-
-            if (
-                frame is not None
-                and decision_reference is not None
-                and now - decision_locked_at >= LIVE_DECISION_HOLD_SECONDS
-            ):
-                change_score = _scene_change_score(decision_reference, frame)
-                if change_score >= LIVE_SCENE_CHANGE_THRESHOLD:
-                    scene_change_hits += 1
-                else:
-                    scene_change_hits = max(0, scene_change_hits - 1)
-
-                if scene_change_hits >= LIVE_SCENE_CHANGE_HITS:
-                    live_state.reset()
-                    decision_reference = None
-                    decision_locked_at = 0.0
-                    scene_change_hits = 0
-                    last_result_signature = None
-                    last_inference = 0.0
-                    last_frame_at = 0.0
-                    settle_until = now + LIVE_INITIAL_SETTLE_SECONDS
-
-                    status_slot.info(
-                        "NEW OBJECT DETECTED · re-arming AI automatically…"
-                    )
-                    result_slot.empty()
-                    with result_slot.container():
-                        st.markdown(
-                            '<div class="science-decision uncertain">'
-                            '<h2>NEW OBJECT DETECTED</h2>'
-                            '<p>HOLD IT STEADY FOR AUTOMATIC CLASSIFICATION</p>'
-                            '</div>',
-                            unsafe_allow_html=True,
-                        )
-
-            time.sleep(0.12)
-            continue
-
-        if now < settle_until:
-            status_slot.info("AUTO MODE · waiting briefly for a steady object…")
-            time.sleep(0.12)
-            continue
-
-        if (
-            frame is not None
-            and captured_at > last_frame_at
-            and now - last_inference >= LIVE_INFERENCE_INTERVAL
-            and now >= error_until
+        if st.button(
+            "▶ RESUME SCAN",
+            key="resume-live-scan",
+            type="primary",
+            use_container_width=True,
         ):
-            last_inference = now
-            last_frame_at = captured_at
+            live_state.reset()
+            st.session_state["live_last_inference"] = 0.0
+            st.session_state["live_last_frame_at"] = 0.0
+            st.session_state["live_service_checked"] = True
+            st.session_state["live_scan_resume_at"] = time.monotonic() + 0.6
+            st.rerun()
 
-            ok, encoded = cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90]
-            )
-            if not ok:
-                status_slot.warning("Could not encode the camera frame.")
-                time.sleep(0.12)
-                continue
+        return
 
-            status_slot.info("AI · analyzing live object automatically…")
-            try:
-                result = classify_image(
-                    api_url,
-                    "live-frame.jpg",
-                    encoded.tobytes(),
-                    "image/jpeg",
-                    max_attempts=1,
-                    check_health=not service_checked,
-                    predict_timeout=LIVE_PREDICT_TIMEOUT,
-                )
-                service_checked = True
-                error_until = 0.0
-
-                snapshot = live_state.update(result)
-
-                if snapshot.is_final:
-                    decision_reference = frame.copy()
-                    decision_locked_at = time.monotonic()
-                    scene_change_hits = 0
-                    status_slot.success(
-                        f"FINAL DECISION · {snapshot.top_class} · "
-                        f"{snapshot.confidence:.1f}% · "
-                        "replace/remove the object for automatic next scan"
-                    )
-                    st.toast(f"DECISION COMMITTED · {snapshot.top_class}")
-                elif snapshot.is_confident:
-                    status_slot.warning(
-                        f"AUTO STABILITY · {snapshot.consecutive_frames}/3 · "
-                        f"{snapshot.top_class} {snapshot.confidence:.1f}%"
-                    )
-                else:
-                    status_slot.warning(
-                        f"AUTO SCANNING · {snapshot.top_class or 'uncertain'} "
-                        f"{snapshot.confidence:.1f}% · need ≥70%"
-                    )
-
-            except ClassificationError as error:
-                error_until = time.monotonic() + LIVE_ERROR_COOLDOWN
-                service_checked = False
-                status_slot.warning(
-                    "AI service temporarily unavailable · "
-                    f"automatic retry in {int(LIVE_ERROR_COOLDOWN)}s · "
-                    f"{error.user_message}"
-                )
-
-        current = live_state.display_result()
-        if current:
-            signature = (
-                current.get("top_class"),
-                round(float(current.get("top_confidence", 0.0)), 1),
-                live_state.final_class,
-                current.get("semantic_guard_applied"),
-            )
-            if signature != last_result_signature:
-                result_slot.empty()
-                with result_slot.container():
-                    render_science_prediction(current, live_state.final_class)
-                last_result_signature = signature
-        elif last_result_signature is None:
-            result_slot.markdown(
-                '<div class="science-decision uncertain">'
-                '<h2>AUTO SCANNING</h2>'
-                '<p>PLACE ONE OBJECT INSIDE THE GREEN BOX</p>'
-                '</div>',
-                unsafe_allow_html=True,
-            )
-
+    resume_at = st.session_state.get("live_scan_resume_at", 0.0)
+    if time.monotonic() < resume_at:
+        status_slot.info("RESUME SCAN · preparing the next object…")
         time.sleep(0.12)
+        st.rerun()
+
+    if frame is None:
+        status_slot.info(
+            "AUTO MODE · waiting for a camera frame. "
+            "Place one object inside the green box."
+        )
+        time.sleep(0.25)
+        st.rerun()
+
+    now = time.monotonic()
+    last_inference = st.session_state.get("live_last_inference", 0.0)
+    last_frame_at = st.session_state.get("live_last_frame_at", 0.0)
+
+    if (
+        captured_at <= last_frame_at
+        or now - last_inference < LIVE_INFERENCE_INTERVAL
+    ):
+        status_slot.info("AUTO MODE · detecting the object automatically…")
+        time.sleep(0.12)
+        st.rerun()
+
+    st.session_state["live_last_inference"] = now
+    st.session_state["live_last_frame_at"] = captured_at
+
+    ok, encoded = cv2.imencode(
+        ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90]
+    )
+    if not ok:
+        status_slot.warning("Could not encode the camera frame.")
+        time.sleep(0.25)
+        st.rerun()
+
+    status_slot.info("AI · analyzing the live object automatically…")
+    try:
+        result = classify_image(
+            api_url,
+            "live-frame.jpg",
+            encoded.tobytes(),
+            "image/jpeg",
+            max_attempts=1,
+            check_health=not st.session_state.get("live_service_checked", False),
+            predict_timeout=LIVE_PREDICT_TIMEOUT,
+        )
+        st.session_state["live_service_checked"] = True
+        live_state.update(result)
+        st.rerun()
+
+    except ClassificationError as error:
+        status_slot.error(error.user_message)
+        with st.expander("Technical details"):
+            st.code(error.technical)
+        time.sleep(LIVE_ERROR_COOLDOWN)
+        st.rerun()
+
+    except Exception as error:
+        status_slot.error(
+            f"Live classification failed: {type(error).__name__}: {error}"
+        )
+        time.sleep(LIVE_ERROR_COOLDOWN)
+        st.rerun()
 
 def render_science_prediction(result, final_class):
     """Render the desktop-style science-fair prediction panel."""
@@ -728,8 +684,8 @@ if active_view == navigation_options[3]:
         ("02", "PREPROCESS", "The service resizes and normalizes the image for the trained model."),
         ("03", "CLASSIFY", "The AI compares the object with Recyclable, Dry Waste, and Wet Waste classes."),
         ("04", "SORT", "Use the trained model decision and disposal guidance for the correct bin."),
-        ("05", "AUTO DECIDE", "Live mode samples automatically and requires 3 consecutive predictions at or above 70% before committing."),
-        ("06", "AUTO RE-ARM", "After a decision, persistent movement/replacement in the green scan zone automatically starts the next classification."),
+        ("05", "AUTO DECIDE", "Live mode automatically accepts the first valid trained-model prediction as the final decision, including predictions below 70% confidence."),
+        ("06", "RESUME SCAN", "Press Resume Scan after a final result to clear it and automatically begin detecting the next object without a hard refresh."),
     ]
     for number, title, text in steps:
         col_number, col_copy = st.columns([.12, .88])
