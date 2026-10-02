@@ -93,13 +93,13 @@ def _check_health(session, api_url: str) -> Optional[ClassificationError]:
     )
 
 
-def _post_predict(session, api_url: str, filename: str, data: bytes, content_type: str) -> dict:
+def _post_predict(session, api_url: str, filename: str, data: bytes, content_type: str, predict_timeout=None) -> dict:
     """Return the validated prediction dict or raise ClassificationError."""
     try:
         response = session.post(
             f"{api_url}/predict",
             files={"file": (filename, data, content_type)},
-            timeout=PREDICT_TIMEOUT,
+            timeout=predict_timeout or PREDICT_TIMEOUT,
         )
     except requests.Timeout as error:
         raise ClassificationError(
@@ -156,6 +156,8 @@ def classify_image(
     sleep: Callable[[float], None] = time.sleep,
     max_attempts: int = MAX_ATTEMPTS,
     on_status: Optional[Callable[[str], None]] = None,
+    check_health: bool = True,
+    predict_timeout=None,
 ) -> dict:
     """Check /health, then POST /predict, retrying transient failures with bounded backoff."""
     session = session or requests
@@ -166,10 +168,14 @@ def classify_image(
         if on_status:
             on_status(f"Contacting the classification service (attempt {attempt} of {max_attempts})...")
         try:
-            not_ready = _check_health(session, api_url)
-            if not_ready is None:
-                return _post_predict(session, api_url, filename, data, content_type)
-            last_error = not_ready
+            if check_health:
+                not_ready = _check_health(session, api_url)
+                if not_ready is not None:
+                    last_error = not_ready
+                    if not last_error.retryable:
+                        raise last_error
+                    continue
+            return _post_predict(session, api_url, filename, data, content_type, predict_timeout=predict_timeout)
         except ClassificationError as error:
             last_error = error
 
