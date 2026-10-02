@@ -975,6 +975,7 @@ def render_live_inference(ctx):
             st.session_state["live_last_frame_at"] = 0.0
             st.session_state["live_service_checked"] = True
             st.session_state["live_scan_resume_at"] = time.monotonic() + 0.6
+            st.session_state["science_last_beep_result"] = None
             st.rerun()
 
         return
