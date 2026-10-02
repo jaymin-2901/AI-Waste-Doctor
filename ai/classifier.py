@@ -145,7 +145,8 @@ class WasteClassifier:
         self.load_model()
 
         if self.semantic_guard_enabled and TF_AVAILABLE:
-            self.load_semantic_model()
+            # Lazy-load the ImageNet helper only when a scan actually needs it.
+            self.semantic_status = "lazy"
 
     def set_smoothing_frames(self, frames: int):
         self.smoothing_frames = max(1, int(frames))
@@ -216,7 +217,8 @@ class WasteClassifier:
 
         try:
             self.semantic_model = tf.keras.applications.MobileNetV2(
-                input_shape=(224, 224, 3),
+                input_shape=(160, 160, 3),
+                alpha=0.35,
                 include_top=True,
                 weights="imagenet",
                 classifier_activation="softmax",
@@ -284,7 +286,7 @@ class WasteClassifier:
                 box = self._scaled_crop_box(frame, crop_box, scale)
                 batch, _ = preprocess_frame(
                     frame,
-                    target_size=(224, 224),
+                    target_size=(160, 160),
                     normalization_mode="-1_to_1",
                     crop_box=box,
                 )
@@ -491,10 +493,12 @@ class WasteClassifier:
                 base_top_index = int(np.argmax(raw_probs))
                 base_top_label = self.labels[base_top_index].strip().lower()
                 if (
-                    self.semantic_model is not None
+                    self.semantic_guard_enabled
                     and base_top_label != "wet waste"
                     and "organic" not in base_top_label
                 ):
+                    if self.semantic_model is None:
+                        self.load_semantic_model()
                     semantic_hint = self._semantic_food_hint(
                         frame,
                         crop_box,
@@ -505,8 +509,9 @@ class WasteClassifier:
                         semantic_hint,
                     )
             except Exception as error:
+                self.model_error = str(error)
                 print(f"[Classifier] Inference error: {error}")
-                raw_probs = self._generate_demo_predictions()
+                raise RuntimeError(f"Primary classifier inference failed: {error}") from error
 
         self.history_buffer.append(raw_probs)
         smoothed_probs = np.mean(
