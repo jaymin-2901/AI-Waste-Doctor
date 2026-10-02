@@ -20,6 +20,12 @@ from live_scan import LiveScanState, LiveVideoProcessor
 
 DEFAULT_API_URL = "https://ai-waste-doctor-api.onrender.com"
 EXPECTED_API_BUILD = "2026-10-02-stable-live-lazy-semantic-v3.1"
+LIVE_INFERENCE_INTERVAL = 0.90
+LIVE_INITIAL_SETTLE_SECONDS = 0.75
+LIVE_DECISION_HOLD_SECONDS = 1.0
+LIVE_SCENE_CHANGE_THRESHOLD = 18.0
+LIVE_SCENE_CHANGE_HITS = 3
+LIVE_ERROR_COOLDOWN = 6.0
 CATEGORY_COLORS = {
     "Recyclable": "#FBBF24",
     "Dry Waste": "#60A5FA",
@@ -254,102 +260,224 @@ def show_classification_error(error):
 
 
 
-def render_live_inference(ctx):
-    """Render a stable manual camera scanner without Streamlit fragment reruns.
+def _scan_zone_gray(frame):
+    """Normalize the classifier scan zone for local scene-change detection."""
+    height, width = frame.shape[:2]
+    box_size = max(32, int(min(width, height) * 0.60))
+    left = max(0, (width - box_size) // 2)
+    top = max(0, (height - box_size) // 2)
+    crop = frame[top:top + box_size, left:left + box_size]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, (96, 96), interpolation=cv2.INTER_AREA)
+    return cv2.GaussianBlur(gray, (5, 5), 0)
 
-    WebRTC callbacks run independently from Streamlit's script lifecycle.
-    Keeping the scan action in the normal Streamlit script prevents stale
-    fragment callbacks from accessing removed session-state/component keys.
-    """
+
+def _scene_change_score(reference_frame, current_frame):
+    """Detect replacement/removal of an object; never chooses its waste class."""
+    if reference_frame is None or current_frame is None:
+        return 0.0
+    try:
+        reference = _scan_zone_gray(reference_frame)
+        current = _scan_zone_gray(current_frame)
+        pixel_delta = float(cv2.absdiff(reference, current).mean())
+        ref_edges = cv2.Canny(reference, 60, 140)
+        cur_edges = cv2.Canny(current, 60, 140)
+        edge_delta = float(
+            cv2.absdiff(ref_edges, cur_edges).mean() / 255.0 * 100.0
+        )
+        return pixel_delta + 0.20 * edge_delta
+    except Exception:
+        return 0.0
+
+
+def render_live_inference(ctx):
+    """Continuously classify the camera object and automatically re-arm."""
     processor = ctx.video_processor if ctx is not None else None
     if processor is None:
-        st.info("Start the camera to begin live scanning.")
+        st.info("Start the camera once to begin automatic live detection.")
         return
-
-    frame, captured_at = processor.latest_frame()
-    width, height, camera_fps = processor.frame_info()
-
-    if width and height:
-        st.caption(
-            f"CAMERA: {width}×{height} · {camera_fps:.1f} FPS · "
-            "MODE: MANUAL STABLE SCAN"
-        )
-
-    if frame is not None:
-        preview = frame.copy()
-        preview = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
-        st.image(preview, channels="RGB", width="stretch")
-    else:
-        st.info("Waiting for the first camera frame...")
-
-    col_scan, col_reset = st.columns(2)
-    with col_scan:
-        scan_clicked = st.button(
-            "SCAN CURRENT OBJECT",
-            key="science_scan_current_v6",
-            type="primary",
-            width="stretch",
-        )
-    with col_reset:
-        reset_clicked = st.button(
-            "RESET DECISION",
-            key="science_scan_reset_v6",
-            width="stretch",
-        )
 
     live_state = st.session_state["live_scan_state"]
 
-    if reset_clicked:
-        live_state.reset()
-        st.session_state["live_last_inference"] = 0.0
-        st.rerun()
+    # This loop is deliberately a normal Streamlit polling loop. It avoids
+    # st.fragment callbacks, which previously raced with WebRTC component
+    # teardown and deleted session-state keys.
+    last_inference = 0.0
+    last_frame_at = 0.0
+    error_until = 0.0
+    service_checked = False
+    last_result_signature = None
 
-    if scan_clicked:
-        if frame is None:
-            st.warning("Camera frame is not ready yet. Wait a moment and scan again.")
-        else:
+    decision_reference = None
+    decision_locked_at = 0.0
+    scene_change_hits = 0
+    settle_until = time.monotonic() + LIVE_INITIAL_SETTLE_SECONDS
+
+    result_slot = st.empty()
+    status_slot = st.empty()
+    meta_slot = st.empty()
+    preview_slot = st.empty()
+
+    while ctx.state.playing:
+        now = time.monotonic()
+        frame, captured_at = processor.latest_frame()
+        width, height, camera_fps = processor.frame_info()
+
+        if width and height:
+            mode = (
+                "WATCHING FOR NEXT OBJECT"
+                if live_state.committed_result is not None
+                else "AUTOMATIC AI SCANNING"
+            )
+            meta_slot.caption(
+                f"CAMERA: {width}×{height} · {camera_fps:.1f} FPS · {mode}"
+            )
+
+        if frame is not None:
+            preview_slot.image(
+                cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                channels="RGB",
+                width="stretch",
+                caption="Automatic live scan · keep one object inside the green box",
+            )
+
+        # Once a decision is final, pause API calls. Local vision watches for a
+        # persistent change, then automatically clears the decision.
+        if live_state.committed_result is not None:
+            if decision_reference is None and frame is not None:
+                decision_reference = frame.copy()
+                decision_locked_at = now
+
+            if (
+                frame is not None
+                and decision_reference is not None
+                and now - decision_locked_at >= LIVE_DECISION_HOLD_SECONDS
+            ):
+                change_score = _scene_change_score(decision_reference, frame)
+                if change_score >= LIVE_SCENE_CHANGE_THRESHOLD:
+                    scene_change_hits += 1
+                else:
+                    scene_change_hits = max(0, scene_change_hits - 1)
+
+                if scene_change_hits >= LIVE_SCENE_CHANGE_HITS:
+                    live_state.reset()
+                    decision_reference = None
+                    decision_locked_at = 0.0
+                    scene_change_hits = 0
+                    last_result_signature = None
+                    last_inference = 0.0
+                    last_frame_at = 0.0
+                    settle_until = now + LIVE_INITIAL_SETTLE_SECONDS
+
+                    status_slot.info(
+                        "NEW OBJECT DETECTED · re-arming AI automatically…"
+                    )
+                    result_slot.empty()
+                    with result_slot.container():
+                        st.markdown(
+                            '<div class="science-decision uncertain">'
+                            '<h2>NEW OBJECT DETECTED</h2>'
+                            '<p>HOLD IT STEADY FOR AUTOMATIC CLASSIFICATION</p>'
+                            '</div>',
+                            unsafe_allow_html=True,
+                        )
+
+            time.sleep(0.12)
+            continue
+
+        if now < settle_until:
+            status_slot.info("AUTO MODE · waiting briefly for a steady object…")
+            time.sleep(0.12)
+            continue
+
+        if (
+            frame is not None
+            and captured_at > last_frame_at
+            and now - last_inference >= LIVE_INFERENCE_INTERVAL
+            and now >= error_until
+        ):
+            last_inference = now
+            last_frame_at = captured_at
+
             ok, encoded = cv2.imencode(
-                ".jpg",
-                frame,
-                [cv2.IMWRITE_JPEG_QUALITY, 88],
+                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90]
             )
             if not ok:
-                st.error("Could not encode the current camera frame.")
-            else:
-                try:
-                    result = classify_image(
-                        api_url,
-                        "live-frame.jpg",
-                        encoded.tobytes(),
-                        "image/jpeg",
-                        max_attempts=2,
+                status_slot.warning("Could not encode the camera frame.")
+                time.sleep(0.12)
+                continue
+
+            status_slot.info("AI · analyzing live object automatically…")
+            try:
+                result = classify_image(
+                    api_url,
+                    "live-frame.jpg",
+                    encoded.tobytes(),
+                    "image/jpeg",
+                    max_attempts=1,
+                    check_health=not service_checked,
+                    predict_timeout=LIVE_PREDICT_TIMEOUT,
+                )
+                service_checked = True
+                error_until = 0.0
+
+                snapshot = live_state.update(result)
+
+                if snapshot.is_final:
+                    decision_reference = frame.copy()
+                    decision_locked_at = time.monotonic()
+                    scene_change_hits = 0
+                    status_slot.success(
+                        f"FINAL DECISION · {snapshot.top_class} · "
+                        f"{snapshot.confidence:.1f}% · "
+                        "replace/remove the object for automatic next scan"
                     )
-                    snapshot = live_state.update(result)
-                    st.session_state["live_last_inference"] = time.monotonic()
-                    if snapshot.is_final:
-                        st.toast(f"DECISION COMMITTED · {snapshot.top_class}")
-                    else:
-                        st.info(
-                            f"Stability check: {snapshot.consecutive_frames}/3 frames · "
-                            f"{snapshot.top_class} {snapshot.confidence:.1f}%"
-                        )
-                except ClassificationError as error:
-                    show_classification_error(error)
+                    st.toast(
+                        f"DECISION COMMITTED · {snapshot.top_class}"
+                    )
+                elif snapshot.is_confident:
+                    status_slot.warning(
+                        f"AUTO STABILITY · {snapshot.consecutive_frames}/3 · "
+                        f"{snapshot.top_class} {snapshot.confidence:.1f}%"
+                    )
+                else:
+                    status_slot.warning(
+                        f"AUTO SCANNING · {snapshot.top_class or 'uncertain'} "
+                        f"{snapshot.confidence:.1f}% · need ≥70%"
+                    )
 
-    result = live_state.display_result()
-    final_class = live_state.final_class
+            except ClassificationError as error:
+                error_until = time.monotonic() + LIVE_ERROR_COOLDOWN
+                service_checked = False
+                status_slot.warning(
+                    "AI service temporarily unavailable · "
+                    f"automatic retry in {int(LIVE_ERROR_COOLDOWN)}s · "
+                    f"{error.user_message}"
+                )
 
-    if result:
-        render_science_prediction(result, final_class)
-    else:
-        st.markdown(
-            '<div class="science-decision uncertain">'
-            '<h2>READY TO SCAN</h2>'
-            '<p>Place ONE object inside the green square, then press SCAN CURRENT OBJECT.</p>'
-            '</div>',
-            unsafe_allow_html=True,
-        )
+        current = live_state.display_result()
+        if current:
+            signature = (
+                current.get("top_class"),
+                round(float(current.get("top_confidence", 0.0)), 1),
+                live_state.final_class,
+                current.get("semantic_guard_applied"),
+            )
+            if signature != last_result_signature:
+                result_slot.empty()
+                with result_slot.container():
+                    render_science_prediction(current, live_state.final_class)
+                last_result_signature = signature
+        elif last_result_signature is None:
+            result_slot.markdown(
+                '<div class="science-decision uncertain">'
+                '<h2>AUTO SCANNING</h2>'
+                '<p>PLACE ONE OBJECT INSIDE THE GREEN BOX</p>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
 
+        time.sleep(0.12)
 
 def render_science_prediction(result, final_class):
     """Render the desktop-style science-fair prediction panel."""
@@ -482,12 +610,12 @@ if active_view == navigation_options[1]:
 if active_view == navigation_options[2]:
     st.markdown(
         '<div class="science-header"><p class="science-title">AI WASTE DOCTOR</p>'
-        '<span class="science-chip">SCAN → CLASSIFY → SORT</span>'
+        '<span class="science-chip">AUTO → CLASSIFY → SORT</span>'
         '<span class="science-chip">LIGHT: SIMULATION</span>'
-        '<span class="science-chip">METAL: NOT CONNECTED</span></div>',
+        '<span class="science-chip">AUTO LIVE: ON</span></div>',
         unsafe_allow_html=True,
     )
-    st.markdown('<p class="science-footer">Science Fair Live Mode · camera video is continuous · inference samples one frame per second</p>', unsafe_allow_html=True)
+    st.markdown('<p class="science-footer">Science Fair Auto Live Mode · camera starts once · AI decides automatically · new objects re-arm automatically</p>', unsafe_allow_html=True)
     st.iframe(
         """
         <button
@@ -528,7 +656,7 @@ if active_view == navigation_options[2]:
                 st.caption("NETWORK: Cloudflare TURN/TCP relay · one-way camera transport")
 
             ctx = webrtc_streamer(
-                key="science-fair-camera-v5-stable",
+                key="science-fair-camera-v7-auto-live",
                 mode=WebRtcMode.SENDONLY,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
@@ -557,7 +685,7 @@ if active_view == navigation_options[2]:
         st.markdown('<p class="science-panel-title">REAL-TIME AI CLASSIFICATION</p>', unsafe_allow_html=True)
         if ctx is None or not ctx.state.playing:
             st.markdown('<div class="science-decision uncertain"><h2>SCANNING OBJECT</h2><p>START CAMERA TO BEGIN</p></div>', unsafe_allow_html=True)
-            st.caption("Press START and allow camera access. The live stream uses TURN over TCP/443 on hosted deployments.")
+            st.caption("Press START once and allow camera access. Then place an object in the green box; classification is automatic.")
         else:
             render_live_inference(ctx)
 
@@ -567,7 +695,9 @@ if active_view == navigation_options[3]:
         ("01", "CAPTURE", "Upload an image or take a photo of one waste object."),
         ("02", "PREPROCESS", "The service resizes and normalizes the image for the trained model."),
         ("03", "CLASSIFY", "The AI compares the object with Recyclable, Dry Waste, and Wet Waste classes."),
-        ("04", "SORT", "Use the confidence result and disposal guidance to choose the right bin."),
+        ("04", "SORT", "Use the trained model decision and disposal guidance for the correct bin."),
+        ("05", "AUTO DECIDE", "Live mode samples automatically and requires 3 consecutive predictions at or above 70% before committing."),
+        ("06", "AUTO RE-ARM", "After a decision, persistent movement/replacement in the green scan zone automatically starts the next classification."),
     ]
     for number, title, text in steps:
         col_number, col_copy = st.columns([.12, .88])
