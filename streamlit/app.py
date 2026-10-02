@@ -1288,9 +1288,11 @@ if active_view == navigation_options[2]:
                         "width": {"ideal": 640, "min": 320},
                         "height": {"ideal": 480, "min": 240},
                         "frameRate": {"ideal": 15, "max": 20},
-                        # exact forces a fresh getUserMedia request to use the
-                        # selected mobile camera after the old track is stopped.
-                        "facingMode": {"exact": st.session_state["science_camera_facing"]},
+                        # "exact" can throw OverconstrainedError on browsers/devices
+                        # that do not expose the requested facingMode. "ideal" lets the
+                        # browser choose the requested camera when available without
+                        # rejecting the whole getUserMedia request.
+                        "facingMode": {"ideal": st.session_state["science_camera_facing"]},
                     },
                     "audio": False,
                 },
