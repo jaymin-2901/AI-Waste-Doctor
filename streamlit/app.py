@@ -13,6 +13,7 @@ if str(ROOT_DIR) not in sys.path:
 import cv2
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 from api_client import ClassificationError, classify_image
@@ -575,6 +576,67 @@ st.markdown(
         border-color: var(--accent);
     }
 
+    .science-legend {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: .55rem;
+        margin: .75rem 0 1rem;
+    }
+    .science-legend-item {
+        display: flex;
+        align-items: center;
+        gap: .55rem;
+        min-width: 0;
+        padding: .65rem .7rem;
+        border: 1px solid rgba(255,255,255,.12);
+        border-radius: 12px;
+        background: #0f1720;
+        color: #f8fafc !important;
+        font-size: .72rem;
+        font-weight: 900;
+        line-height: 1.2;
+    }
+    .science-legend-dot {
+        width: 10px;
+        height: 10px;
+        flex: 0 0 10px;
+        border-radius: 50%;
+        box-shadow: 0 0 0 3px rgba(255,255,255,.07);
+    }
+    .science-camera-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: .7rem;
+        margin: 0 0 .7rem;
+        padding: .7rem;
+        border: 1px solid rgba(255,255,255,.13);
+        border-radius: 14px;
+        background: #0f1720;
+    }
+    .science-camera-status {
+        color: #f8fafc !important;
+        font-size: .72rem;
+        font-weight: 850;
+        line-height: 1.35;
+    }
+    .science-camera-status strong { color: var(--accent) !important; }
+    .science-header .science-chip {
+        color: #f8fafc !important;
+        background: #18222d !important;
+        border-color: rgba(255,255,255,.18) !important;
+    }
+    .science-header .science-chip:first-of-type {
+        color: #071008 !important;
+        background: var(--accent) !important;
+        border-color: var(--accent) !important;
+    }
+    @media (max-width: 640px) {
+        .science-legend { grid-template-columns: 1fr; }
+        .science-legend-item { min-height: 42px; }
+        .science-camera-toolbar { align-items: stretch; flex-direction: column; }
+    }
+
     /* WebRTC control strip and generated camera preview. */
     iframe[src*="streamlit_webrtc"] {
         width: 100% !important;
@@ -735,6 +797,12 @@ if "live_inference_in_flight" not in st.session_state:
     st.session_state["live_inference_in_flight"] = False
 if "science_camera_facing" not in st.session_state:
     st.session_state["science_camera_facing"] = "environment"
+if "science_sound_enabled" not in st.session_state:
+    st.session_state["science_sound_enabled"] = True
+if "science_last_beep_result" not in st.session_state:
+    st.session_state["science_last_beep_result"] = None
+if "science_beep_id" not in st.session_state:
+    st.session_state["science_beep_id"] = 0
 
 api_url = st.session_state["api_url"]
 science_mode = st.sidebar.toggle("SCIENCE FAIR MODE", value=False)
@@ -890,6 +958,12 @@ def render_live_inference(ctx):
             "(stable trained-model result)"
         )
 
+        beep_signature = final.get("top_class", "") + "|" + str(final.get("top_confidence", ""))
+        if st.session_state.get("science_last_beep_result") != beep_signature:
+            st.session_state["science_beep_id"] += 1
+            st.session_state["science_last_beep_result"] = beep_signature
+            play_classification_beep(st.session_state["science_beep_id"])
+
         if st.button(
             "▶ RESUME SCAN",
             key="resume-live-scan",
@@ -975,6 +1049,45 @@ def render_live_inference(ctx):
         )
         time.sleep(LIVE_ERROR_COOLDOWN)
         st.rerun()
+
+def play_classification_beep(event_id):
+    """Play a short browser-side success beep without touching the backend."""
+    if not st.session_state.get("science_sound_enabled", True):
+        return
+    components.html(
+        f"""
+        <script>
+        (() => {{
+          const key = "ai-waste-doctor-beep-{event_id}";
+          if (window.sessionStorage.getItem(key)) return;
+          window.sessionStorage.setItem(key, "1");
+          try {{
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) return;
+            const ctx = new AudioCtx();
+            const start = () => {{
+              const now = ctx.currentTime;
+              const gain = ctx.createGain();
+              gain.gain.setValueAtTime(0.0001, now);
+              gain.gain.exponentialRampToValueAtTime(0.18, now + 0.02);
+              gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+              const osc = ctx.createOscillator();
+              osc.type = "sine";
+              osc.frequency.setValueAtTime(880, now);
+              osc.frequency.exponentialRampToValueAtTime(660, now + 0.18);
+              osc.connect(gain).connect(ctx.destination);
+              osc.start(now);
+              osc.stop(now + 0.23);
+            };
+            if (ctx.state === "suspended") {{ ctx.resume().then(start).catch(() => {{}}); }}
+            else start();
+          }} catch (e) {{}}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
 
 def render_science_prediction(result, final_class):
     """Render the desktop-style science-fair prediction panel."""
