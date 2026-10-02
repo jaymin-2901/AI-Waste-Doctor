@@ -254,113 +254,101 @@ def show_classification_error(error):
 
 
 
-@st.fragment(run_every=0.25, key="live-preview")
-def render_live_preview(ctx):
-    """Render the newest received camera frame without sending video back over WebRTC."""
+def render_live_inference(ctx):
+    """Render a stable manual camera scanner without Streamlit fragment reruns.
+
+    WebRTC callbacks run independently from Streamlit's script lifecycle.
+    Keeping the scan action in the normal Streamlit script prevents stale
+    fragment callbacks from accessing removed session-state/component keys.
+    """
     processor = ctx.video_processor if ctx is not None else None
     if processor is None:
-        st.info("Start the camera to display the live preview.")
-        return
-
-    frame, _ = processor.latest_frame()
-    if frame is None:
-        st.caption("Waiting for the first camera frame...")
-        return
-
-    preview = frame.copy()
-    height, width = preview.shape[:2]
-    box_size = int(min(width, height) * 0.6)
-    left = (width - box_size) // 2
-    top = (height - box_size) // 2
-    cv2.rectangle(
-        preview,
-        (left, top),
-        (left + box_size, top + box_size),
-        (16, 185, 129),
-        3,
-    )
-    cv2.putText(
-        preview,
-        "PLACE ONE OBJECT INSIDE THE BOX",
-        (max(12, left), max(28, top - 12)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (16, 185, 129),
-        2,
-        cv2.LINE_AA,
-    )
-    preview = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
-    st.image(preview, channels="RGB", width="stretch")
-
-
-@st.fragment(run_every=1.0, key="live-inference")
-def render_live_inference(ctx):
-    """Sample the latest browser frame without blocking the video stream."""
-    if st.button("SCAN NEXT OBJECT", key="science_scan_next", width="stretch"):
-        st.session_state["live_scan_state"].reset()
-        st.session_state["live_last_inference"] = 0.0
-        st.session_state["live_last_frame_at"] = 0.0
-        st.session_state["live_inference_in_flight"] = False
-        return
-
-    processor = ctx.video_processor
-    if processor is None:
-        st.info("Start the camera to begin live detection.")
+        st.info("Start the camera to begin live scanning.")
         return
 
     frame, captured_at = processor.latest_frame()
     width, height, camera_fps = processor.frame_info()
+
     if width and height:
-        st.caption(f"CAMERA: {width}×{height} · {camera_fps:.1f} FPS · INFERENCE: 1 FPS")
+        st.caption(
+            f"CAMERA: {width}×{height} · {camera_fps:.1f} FPS · "
+            "MODE: MANUAL STABLE SCAN"
+        )
+
+    if frame is not None:
+        preview = frame.copy()
+        preview = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+        st.image(preview, channels="RGB", width="stretch")
+    else:
+        st.info("Waiting for the first camera frame...")
+
+    col_scan, col_reset = st.columns(2)
+    with col_scan:
+        scan_clicked = st.button(
+            "SCAN CURRENT OBJECT",
+            key="science_scan_current_v5",
+            type="primary",
+            width="stretch",
+        )
+    with col_reset:
+        reset_clicked = st.button(
+            "RESET DECISION",
+            key="science_scan_reset_v5",
+            width="stretch",
+        )
+
     live_state = st.session_state["live_scan_state"]
-    if live_state.committed_result is not None:
-        render_science_prediction(live_state.committed_result, live_state.final_class)
-        return
-    now = time.monotonic()
-    frame_is_new = captured_at > st.session_state["live_last_frame_at"]
-    ready_for_inference = now - st.session_state["live_last_inference"] >= 1.0
-    if (
-        frame is not None
-        and captured_at
-        and frame_is_new
-        and ready_for_inference
-        and not st.session_state["live_inference_in_flight"]
-    ):
-        st.session_state["live_last_inference"] = now
-        st.session_state["live_last_frame_at"] = captured_at
-        st.session_state["live_inference_in_flight"] = True
-        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
-        if ok:
-            try:
-                result = classify_image(
-                    api_url,
-                    "live-frame.jpg",
-                    encoded.tobytes(),
-                    "image/jpeg",
-                    max_attempts=1,
-                )
-                live_state = st.session_state["live_scan_state"]
-                snapshot = live_state.update(result)
-                if snapshot.is_final:
-                    committed = live_state.committed_result
-                    if committed is not None and committed.get("_feedback_sent") is not True:
-                        committed["_feedback_sent"] = True
-                        st.toast(f"BEEP · {snapshot.top_class} decision committed")
-            except ClassificationError as error:
-                st.error(error.user_message)
-            finally:
-                st.session_state["live_inference_in_flight"] = False
+
+    if reset_clicked:
+        live_state.reset()
+        st.session_state["live_last_inference"] = 0.0
+        st.rerun()
+
+    if scan_clicked:
+        if frame is None:
+            st.warning("Camera frame is not ready yet. Wait a moment and scan again.")
         else:
-            st.session_state["live_inference_in_flight"] = False
+            ok, encoded = cv2.imencode(
+                ".jpg",
+                frame,
+                [cv2.IMWRITE_JPEG_QUALITY, 88],
+            )
+            if not ok:
+                st.error("Could not encode the current camera frame.")
+            else:
+                try:
+                    result = classify_image(
+                        api_url,
+                        "live-frame.jpg",
+                        encoded.tobytes(),
+                        "image/jpeg",
+                        max_attempts=2,
+                    )
+                    snapshot = live_state.update(result)
+                    st.session_state["live_last_inference"] = time.monotonic()
+                    if snapshot.is_final:
+                        st.toast(f"DECISION COMMITTED · {snapshot.top_class}")
+                    else:
+                        st.info(
+                            f"Stability check: {snapshot.streak}/3 frames · "
+                            f"{snapshot.top_class} {snapshot.confidence:.1f}%"
+                        )
+                except ClassificationError as error:
+                    show_classification_error(error)
 
     result = live_state.display_result()
     final_class = live_state.final_class
+
     if result:
-        if final_class:
-            st.success(f"LIGHT: {CATEGORY_COLORS.get(final_class, '#B6FF2E')} · BUZZER: ONCE · FINAL: {final_class}")
-        else:
-            st.warning("LIVE SCANNING · waiting for 70% confidence stability")
         render_science_prediction(result, final_class)
+    else:
+        st.markdown(
+            '<div class="science-decision uncertain">'
+            '<h2>READY TO SCAN</h2>'
+            '<p>Place ONE object inside the green square, then press SCAN CURRENT OBJECT.</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
 
 def render_science_prediction(result, final_class):
@@ -540,7 +528,7 @@ if active_view == navigation_options[2]:
                 st.caption("NETWORK: Cloudflare TURN/TCP relay · one-way camera transport")
 
             ctx = webrtc_streamer(
-                key="science-fair-camera-v4-sendonly",
+                key="science-fair-camera-v5-stable",
                 mode=WebRtcMode.SENDONLY,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
@@ -558,7 +546,7 @@ if active_view == navigation_options[2]:
             )
 
             if ctx is not None and ctx.state.playing:
-                render_live_preview(ctx)
+                pass
             else:
                 st.caption("Press START, choose a camera if needed, and allow browser camera permission.")
         except Exception as error:
@@ -568,7 +556,6 @@ if active_view == navigation_options[2]:
     with right:
         st.markdown('<p class="science-panel-title">REAL-TIME AI CLASSIFICATION</p>', unsafe_allow_html=True)
         if ctx is None or not ctx.state.playing:
-            st.session_state["live_scan_state"].reset()
             st.markdown('<div class="science-decision uncertain"><h2>SCANNING OBJECT</h2><p>START CAMERA TO BEGIN</p></div>', unsafe_allow_html=True)
             st.caption("Press START and allow camera access. The live stream uses TURN over TCP/443 on hosted deployments.")
         else:
