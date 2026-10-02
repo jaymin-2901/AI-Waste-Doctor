@@ -1355,13 +1355,21 @@ if active_view == navigation_options[2]:
                     st.session_state["science_reference_result"] = None
                     st.error(error.user_message)
             st.image(reference_file, caption="REFERENCE IMAGE · READY", width="stretch")
+            reference_result = st.session_state.get("science_reference_result")
+            if reference_result is not None:
+                reference_signature = (
+                    str(reference_result.get("top_class", ""))
+                    + "|"
+                    + str(reference_result.get("top_confidence", ""))
+                    + "|reference"
+                )
+                if st.session_state.get("science_last_beep_result") != reference_signature:
+                    st.session_state["science_last_beep_result"] = reference_signature
+                    st.session_state["science_beep_id"] += 1
+                    play_classification_beep(st.session_state["science_beep_id"])
         elif st.session_state.get("science_reference_result") is not None:
             st.session_state["science_reference_result"] = None
             st.session_state["science_reference_signature"] = None
-        except Exception as error:
-            ctx = None
-            st.warning("Live browser video is unavailable in this session. Use the LIVE CAMERA capture tab instead.")
-            st.caption(f"WebRTC status: {type(error).__name__}")
     with right:
         st.markdown('<p class="science-panel-title">REAL-TIME AI CLASSIFICATION</p>', unsafe_allow_html=True)
         reference_result = st.session_state.get("science_reference_result")
