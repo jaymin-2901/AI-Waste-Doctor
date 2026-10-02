@@ -273,31 +273,48 @@ st.markdown(
     }
     [data-testid="stRadio"] [role="radiogroup"]::-webkit-scrollbar { display: none; }
     [data-testid="stRadio"] [role="radiogroup"] label {
-        flex: 0 0 auto;
-        min-height: 42px;
+        position: relative;
+        flex: 1 1 0;
+        min-height: 46px;
+        min-width: 0;
         margin: 0 !important;
-        padding: .65rem .95rem !important;
+        padding: .68rem .7rem !important;
         border: 1px solid transparent;
         border-radius: 11px;
-        color: var(--muted);
-        background: transparent;
+        color: #f8fafc !important;
+        background: #18222d !important;
         transition: .18s ease;
+        overflow: hidden;
     }
     [data-testid="stRadio"] [role="radiogroup"] label:hover {
-        color: var(--text);
-        background: rgba(255,255,255,.045);
+        color: #ffffff !important;
+        background: #22303d !important;
+        border-color: rgba(255,255,255,.10);
     }
     [data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) {
-        color: #0b1118 !important;
+        color: #071008 !important;
         background: var(--accent) !important;
         border-color: var(--accent) !important;
         box-shadow: 0 7px 20px rgba(182,255,46,.18);
-        font-weight: 850;
+        font-weight: 950;
     }
-    [data-testid="stRadio"] [role="radiogroup"] label p {
-        font-size: .78rem !important;
-        font-weight: 800 !important;
+    [data-testid="stRadio"] [role="radiogroup"] label p,
+    [data-testid="stRadio"] [role="radiogroup"] label span {
+        color: inherit !important;
+        font-size: .76rem !important;
+        font-weight: 900 !important;
         white-space: nowrap;
+    }
+    [data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) p,
+    [data-testid="stRadio"] [role="radiogroup"] label:has(input:checked) span {
+        color: #071008 !important;
+    }
+    [data-testid="stRadio"] [role="radiogroup"] input {
+        position: absolute !important;
+        opacity: 0 !important;
+        width: 1px !important;
+        height: 1px !important;
+        pointer-events: none !important;
     }
 
     .panel {
@@ -524,6 +541,40 @@ st.markdown(
         line-height: 1.5;
     }
 
+    .science-camera-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: .65rem;
+        margin: 0 0 .8rem;
+        padding: .65rem .75rem;
+        border: 1px solid rgba(182,255,46,.22);
+        border-radius: 14px;
+        background: #111923;
+    }
+    .science-camera-status {
+        color: #f8fafc;
+        font-size: .72rem;
+        font-weight: 850;
+        letter-spacing: .035em;
+    }
+    .science-camera-status strong {
+        color: var(--accent);
+    }
+    .science-camera-switch button {
+        min-height: 40px !important;
+    }
+    .science-header .science-chip {
+        color: #f8fafc;
+        background: #18222d;
+        border-color: rgba(255,255,255,.18);
+    }
+    .science-header .science-chip:first-of-type {
+        color: #071008;
+        background: var(--accent);
+        border-color: var(--accent);
+    }
+
     /* WebRTC control strip and generated camera preview. */
     iframe[src*="streamlit_webrtc"] {
         width: 100% !important;
@@ -602,11 +653,13 @@ st.markdown(
             padding: .3rem;
         }
         [data-testid="stRadio"] [role="radiogroup"] label {
-            min-height: 40px;
-            padding: .58rem .72rem !important;
+            flex: 0 0 auto;
+            min-height: 42px;
+            padding: .58rem .78rem !important;
         }
-        [data-testid="stRadio"] [role="radiogroup"] label p {
-            font-size: .7rem !important;
+        [data-testid="stRadio"] [role="radiogroup"] label p,
+        [data-testid="stRadio"] [role="radiogroup"] label span {
+            font-size: .68rem !important;
         }
         .panel {
             padding: .9rem;
@@ -680,6 +733,8 @@ if "live_last_frame_at" not in st.session_state:
     st.session_state["live_last_frame_at"] = 0.0
 if "live_inference_in_flight" not in st.session_state:
     st.session_state["live_inference_in_flight"] = False
+if "science_camera_facing" not in st.session_state:
+    st.session_state["science_camera_facing"] = "environment"
 
 api_url = st.session_state["api_url"]
 science_mode = st.sidebar.toggle("SCIENCE FAIR MODE", value=False)
@@ -1035,6 +1090,7 @@ if active_view == navigation_options[1]:
     left, right = st.columns([1.05, .95], gap="large")
     with left:
         st.markdown('<p class="panel-label">CAMERA SCAN</p>', unsafe_allow_html=True)
+        st.info("Mobile tip: use your browser camera switch control to choose front or rear camera.")
         camera_file = st.camera_input("Capture a waste object", label_visibility="collapsed")
         if camera_file and st.button("CLASSIFY CAPTURE", type="primary", width="stretch"):
             status_box = st.empty()
@@ -1083,6 +1139,20 @@ if active_view == navigation_options[2]:
     left, right = st.columns([1.08, .92], gap="medium")
     with left:
         st.markdown('<p class="science-panel-title">LIVE CAMERA FEED</p>', unsafe_allow_html=True)
+        camera_label = "REAR CAMERA" if st.session_state["science_camera_facing"] == "environment" else "FRONT CAMERA"
+        st.markdown(
+            f'<div class="science-camera-toolbar"><div class="science-camera-status">ACTIVE: <strong>{camera_label}</strong> · MOBILE READY</div></div>',
+            unsafe_allow_html=True,
+        )
+        switch_col, info_col = st.columns([.34, .66], gap="small")
+        with switch_col:
+            if st.button("↔ SWITCH CAMERA", key="science-switch-camera", use_container_width=True):
+                st.session_state["science_camera_facing"] = (
+                    "user" if st.session_state["science_camera_facing"] == "environment" else "environment"
+                )
+                st.rerun()
+        with info_col:
+            st.caption("Use rear camera for objects; switch to front camera for demonstrations.")
         try:
             rtc_configuration, rtc_mode, rtc_error = get_rtc_configuration()
             if rtc_error:
@@ -1098,7 +1168,7 @@ if active_view == navigation_options[2]:
                 st.caption("NETWORK: Cloudflare TURN/TCP relay · one-way camera transport")
 
             ctx = webrtc_streamer(
-                key="science-fair-camera-v7-auto-live",
+                key=f"science-fair-camera-v8-auto-live-{st.session_state['science_camera_facing']}",
                 mode=WebRtcMode.SENDONLY,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
@@ -1107,6 +1177,7 @@ if active_view == navigation_options[2]:
                         "width": {"ideal": 640, "min": 320},
                         "height": {"ideal": 480, "min": 240},
                         "frameRate": {"ideal": 15, "max": 20},
+                        "facingMode": {"ideal": st.session_state["science_camera_facing"]},
                     },
                     "audio": False,
                 },
