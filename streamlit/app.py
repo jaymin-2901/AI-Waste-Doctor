@@ -797,12 +797,14 @@ if "live_last_frame_at" not in st.session_state:
     st.session_state["live_last_frame_at"] = 0.0
 if "live_inference_in_flight" not in st.session_state:
     st.session_state["live_inference_in_flight"] = False
-if "science_camera_facing" not in st.session_state:
-    st.session_state["science_camera_facing"] = "environment"
-if "science_camera_generation" not in st.session_state:
-    st.session_state["science_camera_generation"] = 0
 if "science_sound_enabled" not in st.session_state:
     st.session_state["science_sound_enabled"] = True
+if "science_sound_unlocked" not in st.session_state:
+    st.session_state["science_sound_unlocked"] = False
+if "science_reference_signature" not in st.session_state:
+    st.session_state["science_reference_signature"] = None
+if "science_reference_result" not in st.session_state:
+    st.session_state["science_reference_result"] = None
 if "science_last_beep_result" not in st.session_state:
     st.session_state["science_last_beep_result"] = None
 if "science_beep_id" not in st.session_state:
@@ -1083,13 +1085,15 @@ def _classification_beep_audio():
 
 
 def play_classification_beep(event_id):
-    """Play the classification-complete notification in the main Streamlit page."""
+    """Play the completion beep after the user has unlocked browser audio."""
     if not st.session_state.get("science_sound_enabled", True):
         return
+    if not st.session_state.get("science_sound_unlocked", False):
+        return
 
-    # st.audio is intentionally used instead of an isolated component iframe.
-    # Browsers may block scripted audio until the user has interacted with the
-    # page; the camera START interaction normally satisfies that requirement.
+    # The explicit SOUND ON button is a real user gesture. This makes the
+    # subsequent autoplay notification work on desktop and mobile browsers
+    # that otherwise block scripted audio.
     st.audio(
         _classification_beep_audio(),
         format="audio/wav",
@@ -1235,6 +1239,28 @@ if active_view == navigation_options[2]:
         unsafe_allow_html=True,
     )
     st.markdown('<p class="science-footer">Science Fair Auto Live Mode · camera starts once · AI decides automatically · new objects re-arm automatically</p>', unsafe_allow_html=True)
+    sound_col, sound_status_col = st.columns([.34, .66], gap="small")
+    with sound_col:
+        if st.button(
+            "🔊 ENABLE / TEST BEEP",
+            key="science-enable-sound",
+            type="secondary",
+            use_container_width=True,
+        ):
+            st.session_state["science_sound_enabled"] = True
+            st.session_state["science_sound_unlocked"] = True
+            st.session_state["science_last_beep_result"] = None
+            st.session_state["science_beep_id"] += 1
+            st.audio(
+                _classification_beep_audio(),
+                format="audio/wav",
+                autoplay=True,
+            )
+    with sound_status_col:
+        if st.session_state.get("science_sound_unlocked", False):
+            st.caption("🔊 BEEP ENABLED · classification alerts work on desktop and mobile browsers.")
+        else:
+            st.caption("🔇 Tap ENABLE / TEST BEEP once on each device so the browser allows automatic classification sounds.")
     fullscreen_button_html = """
     <button
       onclick="(() => {
@@ -1257,29 +1283,21 @@ if active_view == navigation_options[2]:
     left, right = st.columns([1.08, .92], gap="medium")
     with left:
         st.markdown('<p class="science-panel-title">LIVE CAMERA FEED</p>', unsafe_allow_html=True)
-        camera_label = "REAR CAMERA" if st.session_state["science_camera_facing"] == "environment" else "FRONT CAMERA"
         st.markdown(
-            f'<div class="science-camera-toolbar"><div class="science-camera-status">ACTIVE: <strong>{camera_label}</strong> · MOBILE READY</div></div>',
+            '<div class="science-camera-toolbar"><div class="science-camera-status">ACTIVE: <strong>LIVE CAMERA</strong> · MOBILE READY</div></div>',
             unsafe_allow_html=True,
         )
         try:
             rtc_configuration, rtc_mode, rtc_error = get_rtc_configuration()
             if rtc_error:
-                st.error(
-                    "TURN configuration failed. "
-                    f"{rtc_error}"
-                )
+                st.error("TURN configuration failed. " + rtc_error)
             elif rtc_mode == "Open Relay TURN/TCP":
                 st.caption("NETWORK: TURN relay over TCP · one-way camera transport")
             else:
                 st.caption("NETWORK: Cloudflare TURN/TCP relay · one-way camera transport")
 
             ctx = webrtc_streamer(
-                key=(
-                    "science-fair-camera-v9-auto-live-"
-                    f"{st.session_state['science_camera_facing']}-"
-                    f"{st.session_state['science_camera_generation']}"
-                ),
+                key="science-fair-camera-v10-auto-live",
                 mode=WebRtcMode.SENDONLY,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
@@ -1288,11 +1306,9 @@ if active_view == navigation_options[2]:
                         "width": {"ideal": 640, "min": 320},
                         "height": {"ideal": 480, "min": 240},
                         "frameRate": {"ideal": 15, "max": 20},
-                        # "exact" can throw OverconstrainedError on browsers/devices
-                        # that do not expose the requested facingMode. "ideal" lets the
-                        # browser choose the requested camera when available without
-                        # rejecting the whole getUserMedia request.
-                        "facingMode": {"ideal": st.session_state["science_camera_facing"]},
+                        # Rear camera is preferred when the browser supports it,
+                        # but it is never required, preventing OverconstrainedError.
+                        "facingMode": {"ideal": "environment"},
                     },
                     "audio": False,
                 },
@@ -1301,53 +1317,57 @@ if active_view == navigation_options[2]:
                 async_processing=True,
             )
 
-            if ctx is not None and ctx.state.playing:
-                switch_col, info_col = st.columns([.34, .66], gap="small")
-                with switch_col:
-                    if st.button(
-                        "↔ SWITCH CAMERA",
-                        key="science-switch-camera",
-                        use_container_width=True,
-                    ):
-                        # Release the current media track before mounting the
-                        # new facing-mode WebRTC instance.
-                        try:
-                            ctx.stop()
-                        except Exception:
-                            pass
-                        st.session_state["live_scan_state"].reset()
-                        st.session_state["live_last_inference"] = 0.0
-                        st.session_state["live_last_frame_at"] = 0.0
-                        st.session_state["science_camera_facing"] = (
-                            "user"
-                            if st.session_state["science_camera_facing"] == "environment"
-                            else "environment"
-                        )
-                        st.session_state["science_camera_generation"] += 1
-                        st.session_state["live_scan_resume_at"] = time.monotonic() + 0.8
-                        st.session_state["science_last_beep_result"] = None
-                        st.rerun()
-                with info_col:
-                    st.caption(
-                        "Switches between rear and front camera. The current stream is "
-                        "stopped first so mobile browsers release the camera correctly."
-                    )
-            else:
-                st.caption(
-                    "Press START, allow camera permission, then use SWITCH CAMERA "
-                    "to change between rear and front cameras."
-                )
+            if ctx is None or not ctx.state.playing:
+                st.caption("Press START and allow camera permission. The rear camera is preferred automatically.")
+        except Exception as error:
+            ctx = None
+            st.warning("Live browser video is unavailable in this session. Use the reference image option below.")
+            st.caption(f"WebRTC status: {type(error).__name__}")
 
-            if ctx is not None and ctx.state.playing:
-                pass
-            else:
-                st.caption("Press START, choose a camera if needed, and allow browser camera permission.")
+        st.markdown(
+            '<div class="science-camera-toolbar"><div class="science-camera-status">REFERENCE IMAGE <strong>· MOBILE PHOTO / GALLERY</strong></div></div>',
+            unsafe_allow_html=True,
+        )
+        st.caption("On a phone, choose a photo from your gallery or take a reference photo. It is classified automatically—no scan button.")
+        reference_file = st.file_uploader(
+            "Reference image",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="science-reference-image",
+            label_visibility="collapsed",
+        )
+        if reference_file is not None:
+            reference_bytes = reference_file.getvalue()
+            reference_signature = f"{reference_file.name}:{len(reference_bytes)}:{hash(reference_bytes)}"
+            if st.session_state.get("science_reference_signature") != reference_signature:
+                st.session_state["science_reference_signature"] = reference_signature
+                try:
+                    st.session_state["science_reference_result"] = classify_image(
+                        api_url,
+                        reference_file.name or "reference-image.jpg",
+                        reference_bytes,
+                        reference_file.type or "image/jpeg",
+                        max_attempts=1,
+                        check_health=not st.session_state.get("live_service_checked", False),
+                        predict_timeout=LIVE_PREDICT_TIMEOUT,
+                    )
+                    st.session_state["live_service_checked"] = True
+                except ClassificationError as error:
+                    st.session_state["science_reference_result"] = None
+                    st.error(error.user_message)
+            st.image(reference_file, caption="REFERENCE IMAGE · READY", width="stretch")
+        elif st.session_state.get("science_reference_result") is not None:
+            st.session_state["science_reference_result"] = None
+            st.session_state["science_reference_signature"] = None
         except Exception as error:
             ctx = None
             st.warning("Live browser video is unavailable in this session. Use the LIVE CAMERA capture tab instead.")
             st.caption(f"WebRTC status: {type(error).__name__}")
     with right:
         st.markdown('<p class="science-panel-title">REAL-TIME AI CLASSIFICATION</p>', unsafe_allow_html=True)
+        reference_result = st.session_state.get("science_reference_result")
+        if reference_result is not None:
+            st.markdown('<div class="science-status">REFERENCE IMAGE RESULT · AUTOMATIC CLASSIFICATION</div>', unsafe_allow_html=True)
+            render_prediction(reference_result)
         if ctx is None or not ctx.state.playing:
             st.markdown('<div class="science-decision uncertain"><h2>SCANNING OBJECT</h2><p>START CAMERA TO BEGIN</p></div>', unsafe_allow_html=True)
             st.caption("Press START once and allow camera access. Then place an object in the green box; classification is automatic.")
