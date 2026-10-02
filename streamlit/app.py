@@ -357,7 +357,7 @@ def render_live_inference(ctx):
             caption="Automatic live scan · keep one object inside the green box",
         )
 
-    # A final result stays locked until Resume Scan is pressed.
+    # A final result stays locked until Resume Scan is pressed. Predictions at or below 70% are never finalized; the trained model is sampled again until a stable >=70% result is reached.
     if live_state.committed_result is not None:
         final = live_state.committed_result
         confidence = float(final.get("top_confidence", 0.0))
@@ -376,15 +376,10 @@ def render_live_inference(ctx):
             unsafe_allow_html=True,
         )
 
-        if confidence < 70.0:
-            status_slot.warning(
-                f"FINAL DECISION · {confidence_text} confidence. "
-                "The trained model prediction has been accepted as final."
-            )
-        else:
-            status_slot.success(
-                f"FINAL DECISION · {final.get('top_class', 'Unknown')} · {confidence_text}"
-            )
+        status_slot.success(
+            f"FINAL DECISION · {final.get('top_class', 'Unknown')} · {confidence_text} "
+            "(stable trained-model result)"
+        )
 
         if st.button(
             "▶ RESUME SCAN",
@@ -438,7 +433,7 @@ def render_live_inference(ctx):
         time.sleep(0.25)
         st.rerun()
 
-    status_slot.info("AI · analyzing the live object automatically…")
+    status_slot.info("AI · analyzing live object with the trained model…")
     try:
         result = classify_image(
             api_url,
@@ -450,7 +445,12 @@ def render_live_inference(ctx):
             predict_timeout=LIVE_PREDICT_TIMEOUT,
         )
         st.session_state["live_service_checked"] = True
-        live_state.update(result)
+        snapshot = live_state.update(result)
+        if not snapshot.is_final:
+            status_slot.warning(
+                f"NOT FINAL · {snapshot.top_class or 'unknown'} at {snapshot.confidence:.1f}% "
+                f"(need >70% and {snapshot.consecutive_frames}/3 stable frames). Rechecking…"
+            )
         st.rerun()
 
     except ClassificationError as error:
@@ -684,7 +684,7 @@ if active_view == navigation_options[3]:
         ("02", "PREPROCESS", "The service resizes and normalizes the image for the trained model."),
         ("03", "CLASSIFY", "The AI compares the object with Recyclable, Dry Waste, and Wet Waste classes."),
         ("04", "SORT", "Use the trained model decision and disposal guidance for the correct bin."),
-        ("05", "AUTO DECIDE", "Live mode automatically accepts the first valid trained-model prediction as the final decision, including predictions below 70% confidence."),
+        ("05", "ACCURACY GATE", "Live mode never finalizes a prediction at 70% confidence or below. It keeps rechecking the trained model until the same class reaches above 70% for 3 consecutive frames."),
         ("06", "RESUME SCAN", "Press Resume Scan after a final result to clear it and automatically begin detecting the next object without a hard refresh."),
     ]
     for number, title, text in steps:
