@@ -19,7 +19,7 @@ from api_client import ClassificationError, classify_image
 from live_scan import LiveScanState, LiveVideoProcessor
 
 DEFAULT_API_URL = "https://ai-waste-doctor-api.onrender.com"
-EXPECTED_API_BUILD = "2026-10-02-stable-live-lazy-semantic-v3"
+EXPECTED_API_BUILD = "2026-10-02-stable-live-lazy-semantic-v3.1"
 CATEGORY_COLORS = {
     "Recyclable": "#FBBF24",
     "Dry Waste": "#60A5FA",
@@ -286,14 +286,14 @@ def render_live_inference(ctx):
     with col_scan:
         scan_clicked = st.button(
             "SCAN CURRENT OBJECT",
-            key="science_scan_current_v5",
+            key="science_scan_current_v6",
             type="primary",
             width="stretch",
         )
     with col_reset:
         reset_clicked = st.button(
             "RESET DECISION",
-            key="science_scan_reset_v5",
+            key="science_scan_reset_v6",
             width="stretch",
         )
 
@@ -330,7 +330,7 @@ def render_live_inference(ctx):
                         st.toast(f"DECISION COMMITTED · {snapshot.top_class}")
                     else:
                         st.info(
-                            f"Stability check: {snapshot.streak}/3 frames · "
+                            f"Stability check: {snapshot.consecutive_frames}/3 frames · "
                             f"{snapshot.top_class} {snapshot.confidence:.1f}%"
                         )
                 except ClassificationError as error:
