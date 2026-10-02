@@ -565,7 +565,17 @@ st.markdown(
         color: var(--accent);
     }
     .science-camera-switch button {
-        min-height: 40px !important;
+        min-height: 44px !important;
+        width: 44px !important;
+        min-width: 44px !important;
+        padding: 0 !important;
+        border-radius: 50% !important;
+        font-size: 1.25rem !important;
+        font-weight: 950 !important;
+        color: #071008 !important;
+        background: var(--accent) !important;
+        border-color: var(--accent) !important;
+        box-shadow: 0 8px 20px rgba(182,255,46,.20);
     }
     .science-header .science-chip {
         color: #f8fafc;
@@ -799,6 +809,10 @@ if "live_inference_in_flight" not in st.session_state:
     st.session_state["live_inference_in_flight"] = False
 if "science_sound_enabled" not in st.session_state:
     st.session_state["science_sound_enabled"] = True
+if "science_camera_facing" not in st.session_state:
+    st.session_state["science_camera_facing"] = "environment"
+if "science_camera_generation" not in st.session_state:
+    st.session_state["science_camera_generation"] = 0
 if "science_sound_unlocked" not in st.session_state:
     st.session_state["science_sound_unlocked"] = False
 if "science_reference_signature" not in st.session_state:
@@ -1179,7 +1193,12 @@ def render_prediction(result):
         )
 
 
-navigation_options = ["📁  UPLOAD IMAGE", "📹  LIVE CAMERA", "🎪  SCIENCE FAIR", "💡  HOW IT WORKS", "⚙️  SETTINGS"]
+if science_mode:
+    navigation_options = ["🎪  SCIENCE FAIR"]
+    st.session_state["active_view"] = navigation_options[0]
+else:
+    navigation_options = ["📁  UPLOAD IMAGE", "📹  LIVE CAMERA", "🎪  SCIENCE FAIR", "💡  HOW IT WORKS", "⚙️  SETTINGS"]
+
 active_view = st.radio(
     "Application view",
     navigation_options,
@@ -1296,8 +1315,14 @@ if active_view == navigation_options[2]:
             else:
                 st.caption("NETWORK: Cloudflare TURN/TCP relay · one-way camera transport")
 
+            camera_facing = st.session_state["science_camera_facing"]
+            camera_label = "REAR CAMERA" if camera_facing == "environment" else "FRONT CAMERA"
+
             ctx = webrtc_streamer(
-                key="science-fair-camera-v10-auto-live",
+                key=(
+                    "science-fair-camera-v11-"
+                    f"{camera_facing}-{st.session_state['science_camera_generation']}"
+                ),
                 mode=WebRtcMode.SENDONLY,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
@@ -1306,9 +1331,9 @@ if active_view == navigation_options[2]:
                         "width": {"ideal": 640, "min": 320},
                         "height": {"ideal": 480, "min": 240},
                         "frameRate": {"ideal": 15, "max": 20},
-                        # Rear camera is preferred when the browser supports it,
-                        # but it is never required, preventing OverconstrainedError.
-                        "facingMode": {"ideal": "environment"},
+                        # "ideal" requests the selected mobile camera without
+                        # rejecting devices that expose different constraints.
+                        "facingMode": {"ideal": camera_facing},
                     },
                     "audio": False,
                 },
@@ -1317,8 +1342,36 @@ if active_view == navigation_options[2]:
                 async_processing=True,
             )
 
+            camera_col, status_col = st.columns([.16, .84], gap="small")
+            with camera_col:
+                if st.button(
+                    "↔",
+                    key="science-camera-switch",
+                    help="Switch between the rear and front camera",
+                    use_container_width=True,
+                ):
+                    try:
+                        ctx.stop()
+                    except Exception:
+                        pass
+                    st.session_state["live_scan_state"].reset()
+                    st.session_state["live_last_inference"] = 0.0
+                    st.session_state["live_last_frame_at"] = 0.0
+                    st.session_state["science_last_beep_result"] = None
+                    st.session_state["science_camera_facing"] = (
+                        "user" if camera_facing == "environment" else "environment"
+                    )
+                    st.session_state["science_camera_generation"] += 1
+                    st.session_state["live_scan_resume_at"] = time.monotonic() + 1.0
+                    st.rerun()
+            with status_col:
+                st.markdown(
+                    f'<div class="science-camera-toolbar"><div class="science-camera-status">ACTIVE: <strong>{camera_label}</strong> · TAP ↔ TO SWITCH</div></div>',
+                    unsafe_allow_html=True,
+                )
+
             if ctx is None or not ctx.state.playing:
-                st.caption("Press START and allow camera permission. The rear camera is preferred automatically.")
+                st.caption("Press START and allow camera permission. The rear camera is selected first.")
         except Exception as error:
             ctx = None
             st.warning("Live browser video is unavailable in this session. Use the reference image option below.")
