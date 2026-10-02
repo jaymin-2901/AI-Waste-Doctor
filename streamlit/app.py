@@ -16,7 +16,6 @@ if str(ROOT_DIR) not in sys.path:
 import cv2
 import requests
 import streamlit as st
-import streamlit.components.v1 as components
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 from api_client import ClassificationError, classify_image
@@ -1233,27 +1232,24 @@ if active_view == navigation_options[2]:
         unsafe_allow_html=True,
     )
     st.markdown('<p class="science-footer">Science Fair Auto Live Mode · camera starts once · AI decides automatically · new objects re-arm automatically</p>', unsafe_allow_html=True)
-    st.iframe(
-        """
-        <button
-          onclick="(() => {
-            try {
-              const root = window.parent.document.querySelector('[data-testid=stAppViewContainer]') || window.parent.document.documentElement;
-              if (root.requestFullscreen) {
-                root.requestFullscreen().catch(() =>
-                  window.parent.alert('Fullscreen was blocked. Use browser fullscreen or allow fullscreen for this page.')
-                );
-              }
-            } catch (error) {
-              window.parent.alert('Fullscreen requires HTTPS or localhost and browser permission.');
-            }
-          })()"
-          style="padding:8px 14px;font-weight:700;cursor:pointer;border-radius:8px;border:1px solid #6B9E2A;background:#343741;color:#B6FF2E"
-        >ENTER FULL SCREEN</button>
-        """,
-        height=55,
-        width=240,
-    )
+    fullscreen_button_html = """
+    <button
+      onclick="(() => {
+        try {
+          const root = window.parent.document.querySelector('[data-testid=stAppViewContainer]') || window.parent.document.documentElement;
+          if (root.requestFullscreen) {
+            root.requestFullscreen().catch(() =>
+              window.parent.alert('Fullscreen was blocked. Use browser fullscreen or allow fullscreen for this page.')
+            );
+          }
+        } catch (error) {
+          window.parent.alert('Fullscreen requires HTTPS or localhost and browser permission.');
+        }
+      })()"
+      style="padding:8px 14px;font-weight:700;cursor:pointer;border-radius:8px;border:1px solid #6B9E2A;background:#343741;color:#B6FF2E"
+    >ENTER FULL SCREEN</button>
+    """
+    st.iframe(fullscreen_button_html, height=55, width=240)
 
     left, right = st.columns([1.08, .92], gap="medium")
     with left:
