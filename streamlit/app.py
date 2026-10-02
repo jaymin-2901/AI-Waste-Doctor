@@ -48,6 +48,25 @@ CATEGORY_GUIDANCE = {
 }
 
 
+def _is_mobile_browser():
+    """Return True for common phone/tablet user agents."""
+    try:
+        user_agent = str(st.context.headers.get("User-Agent", "")).lower()
+    except Exception:
+        user_agent = ""
+    mobile_tokens = (
+        "android",
+        "iphone",
+        "ipad",
+        "ipod",
+        "mobile",
+        "windows phone",
+        "opera mini",
+        "iemobile",
+    )
+    return any(token in user_agent for token in mobile_tokens)
+
+
 def _get_secret(name: str):
     """Read a deployment secret from env or Streamlit Community Cloud secrets."""
     value = os.getenv(name)
@@ -806,7 +825,18 @@ if "science_beep_id" not in st.session_state:
     st.session_state["science_beep_id"] = 0
 
 api_url = st.session_state["api_url"]
-science_mode = st.sidebar.toggle("SCIENCE FAIR MODE", value=False)
+mobile_browser = _is_mobile_browser()
+requested_science_mode = st.sidebar.toggle("SCIENCE FAIR MODE", value=False)
+
+if requested_science_mode and mobile_browser:
+    st.sidebar.warning(
+        "🎪 SCIENCE FAIR MODE is designed for desktop/laptop browsers. "
+        "Please open this app on a desktop or laptop for the Science Fair presentation."
+    )
+    science_mode = False
+else:
+    science_mode = requested_science_mode
+
 st.sidebar.markdown("### SYSTEM STATUS")
 st.sidebar.caption(f"API: {api_url}")
 
@@ -1172,6 +1202,13 @@ def render_prediction(result):
         )
 
 
+if mobile_browser and requested_science_mode:
+    st.warning(
+        "📱 **Science Fair Mode is desktop-only.** "
+        "Use a desktop or laptop browser for the live Science Fair presentation. "
+        "Live Camera mode remains available on mobile."
+    )
+
 if science_mode:
     navigation_options = ["🎪  SCIENCE FAIR"]
     st.session_state["active_view"] = "🎪  SCIENCE FAIR"
@@ -1305,52 +1342,6 @@ if active_view == "🎪  SCIENCE FAIR":
             st.warning("Live browser video is unavailable in this session. Use the reference image option below.")
             st.caption(f"WebRTC status: {type(error).__name__}")
 
-        st.markdown(
-            '<div class="science-camera-toolbar"><div class="science-camera-status">REFERENCE IMAGE <strong>· MOBILE PHOTO / GALLERY</strong></div></div>',
-            unsafe_allow_html=True,
-        )
-        st.caption("On a phone, choose a photo from your gallery or take a reference photo. It is classified automatically—no scan button.")
-        reference_file = st.file_uploader(
-            "Reference image",
-            type=["jpg", "jpeg", "png", "webp"],
-            key="science-reference-image",
-            label_visibility="collapsed",
-        )
-        if reference_file is not None:
-            reference_bytes = reference_file.getvalue()
-            reference_signature = f"{reference_file.name}:{len(reference_bytes)}:{hash(reference_bytes)}"
-            if st.session_state.get("science_reference_signature") != reference_signature:
-                st.session_state["science_reference_signature"] = reference_signature
-                try:
-                    st.session_state["science_reference_result"] = classify_image(
-                        api_url,
-                        reference_file.name or "reference-image.jpg",
-                        reference_bytes,
-                        reference_file.type or "image/jpeg",
-                        max_attempts=1,
-                        check_health=not st.session_state.get("live_service_checked", False),
-                        predict_timeout=LIVE_PREDICT_TIMEOUT,
-                    )
-                    st.session_state["live_service_checked"] = True
-                except ClassificationError as error:
-                    st.session_state["science_reference_result"] = None
-                    st.error(error.user_message)
-            st.image(reference_file, caption="REFERENCE IMAGE · READY", width="stretch")
-            reference_result = st.session_state.get("science_reference_result")
-            if reference_result is not None:
-                reference_signature = (
-                    str(reference_result.get("top_class", ""))
-                    + "|"
-                    + str(reference_result.get("top_confidence", ""))
-                    + "|reference"
-                )
-                if st.session_state.get("science_last_beep_result") != reference_signature:
-                    st.session_state["science_last_beep_result"] = reference_signature
-                    st.session_state["science_beep_id"] += 1
-                    play_classification_beep(st.session_state["science_beep_id"])
-        elif st.session_state.get("science_reference_result") is not None:
-            st.session_state["science_reference_result"] = None
-            st.session_state["science_reference_signature"] = None
     with right:
         st.markdown('<p class="science-panel-title">REAL-TIME AI CLASSIFICATION</p>', unsafe_allow_html=True)
         reference_result = st.session_state.get("science_reference_result")
