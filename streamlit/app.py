@@ -813,16 +813,17 @@ science_mode = st.sidebar.toggle("SCIENCE FAIR MODE", value=False)
 st.sidebar.markdown("### SYSTEM STATUS")
 st.sidebar.caption(f"API: {api_url}")
 
+header_mode = "SCIENCE FAIR MODE" if science_mode else "ONLINE MODE"
 st.markdown(
-    f"""
+    """
     <div class="app-header">
       <div>
         <p class="app-title">AI WASTE DOCTOR</p>
         <p class="app-subtitle">INTELLIGENT WASTE CLASSIFICATION SYSTEM · RECYCLE · SORT · CLEANER PLANET</p>
       </div>
-      <div class="mode-badge">{'SCIENCE FAIR MODE' if science_mode else 'ONLINE MODE'}</div>
+      <div class="mode-badge">__MODE__</div>
     </div>
-    """,
+    """.replace("__MODE__", header_mode),
     unsafe_allow_html=True,
 )
 st.write("")
@@ -944,16 +945,18 @@ def render_live_inference(ctx):
         confidence = float(final.get("top_confidence", 0.0))
         confidence_text = f"{confidence:.1f}%"
 
+        final_class = str(final.get("top_class", "Unknown"))
         result_slot.markdown(
-            f'''
+            """
             <div class="science-decision confident">
                 <h2>FINAL DECISION</h2>
                 <div style="font-size:2rem;font-weight:800;margin:.4rem 0">
-                    {final.get("top_class", "Unknown")}
+                    __CLASS__
                 </div>
-                <p>MODEL CONFIDENCE · {confidence_text}</p>
+                <p>MODEL CONFIDENCE · __CONFIDENCE__</p>
             </div>
-            ''',
+            """.replace("__CLASS__", final_class)
+            .replace("__CONFIDENCE__", confidence_text),
             unsafe_allow_html=True,
         )
 
