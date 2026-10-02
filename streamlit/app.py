@@ -1,8 +1,11 @@
 """AI Waste Doctor browser frontend for Streamlit Cloud."""
 
+import io
+import math
 import os
 import sys
 import time
+import wave
 from pathlib import Path
 
 # Add repository root to Python import path
@@ -797,6 +800,8 @@ if "live_inference_in_flight" not in st.session_state:
     st.session_state["live_inference_in_flight"] = False
 if "science_camera_facing" not in st.session_state:
     st.session_state["science_camera_facing"] = "environment"
+if "science_camera_generation" not in st.session_state:
+    st.session_state["science_camera_generation"] = 0
 if "science_sound_enabled" not in st.session_state:
     st.session_state["science_sound_enabled"] = True
 if "science_last_beep_result" not in st.session_state:
@@ -1051,48 +1056,43 @@ def render_live_inference(ctx):
         time.sleep(LIVE_ERROR_COOLDOWN)
         st.rerun()
 
+@st.cache_data(show_spinner=False)
+def _classification_beep_audio():
+    """Generate a tiny self-contained WAV notification sound."""
+    sample_rate = 44100
+    duration = 0.24
+    frames = int(sample_rate * duration)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        for i in range(frames):
+            t = i / sample_rate
+            # Two-note confirmation chirp with a short fade in/out.
+            if t < 0.11:
+                frequency = 880.0
+            else:
+                frequency = 660.0
+            envelope = min(1.0, t / 0.012, (duration - t) / 0.035)
+            sample = int(0.28 * envelope * math.sin(2.0 * math.pi * frequency * t) * 32767)
+            wav.writeframes(sample.to_bytes(2, byteorder="little", signed=True))
+    return buffer.getvalue()
+
+
 def play_classification_beep(event_id):
-    """Play a short browser-side success beep without touching the backend."""
+    """Play the classification-complete notification in the main Streamlit page."""
     if not st.session_state.get("science_sound_enabled", True):
         return
 
-    # Keep this HTML as a normal string rather than an f-string so JavaScript
-    # braces can never trigger Python f-string parsing errors.
-    beep_html = """
-        <script>
-        (() => {
-          const key = "ai-waste-doctor-beep-__EVENT_ID__";
-          if (window.sessionStorage.getItem(key)) return;
-          window.sessionStorage.setItem(key, "1");
-          try {
-            const AudioCtx = window.AudioContext || window.webkitAudioContext;
-            if (!AudioCtx) return;
-            const ctx = new AudioCtx();
-            const start = () => {
-              const now = ctx.currentTime;
-              const gain = ctx.createGain();
-              gain.gain.setValueAtTime(0.0001, now);
-              gain.gain.exponentialRampToValueAtTime(0.18, now + 0.02);
-              gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
-              const osc = ctx.createOscillator();
-              osc.type = "sine";
-              osc.frequency.setValueAtTime(880, now);
-              osc.frequency.exponentialRampToValueAtTime(660, now + 0.18);
-              osc.connect(gain).connect(ctx.destination);
-              osc.start(now);
-              osc.stop(now + 0.23);
-            };
-            if (ctx.state === "suspended") {
-              ctx.resume().then(start).catch(() => {});
-            } else {
-              start();
-            }
-          } catch (e) {}
-        })();
-        </script>
-    """.replace("__EVENT_ID__", str(event_id))
-
-    components.html(beep_html, height=0)
+    # st.audio is intentionally used instead of an isolated component iframe.
+    # Browsers may block scripted audio until the user has interacted with the
+    # page; the camera START interaction normally satisfies that requirement.
+    st.audio(
+        _classification_beep_audio(),
+        format="audio/wav",
+        autoplay=True,
+    )
 
 
 def render_science_prediction(result, final_class):
@@ -1263,15 +1263,6 @@ if active_view == navigation_options[2]:
             f'<div class="science-camera-toolbar"><div class="science-camera-status">ACTIVE: <strong>{camera_label}</strong> · MOBILE READY</div></div>',
             unsafe_allow_html=True,
         )
-        switch_col, info_col = st.columns([.34, .66], gap="small")
-        with switch_col:
-            if st.button("↔ SWITCH CAMERA", key="science-switch-camera", use_container_width=True):
-                st.session_state["science_camera_facing"] = (
-                    "user" if st.session_state["science_camera_facing"] == "environment" else "environment"
-                )
-                st.rerun()
-        with info_col:
-            st.caption("Use rear camera for objects; switch to front camera for demonstrations.")
         try:
             rtc_configuration, rtc_mode, rtc_error = get_rtc_configuration()
             if rtc_error:
@@ -1280,14 +1271,16 @@ if active_view == navigation_options[2]:
                     f"{rtc_error}"
                 )
             elif rtc_mode == "Open Relay TURN/TCP":
-                st.caption(
-                    "NETWORK: TURN relay over TCP · one-way camera transport"
-                )
+                st.caption("NETWORK: TURN relay over TCP · one-way camera transport")
             else:
                 st.caption("NETWORK: Cloudflare TURN/TCP relay · one-way camera transport")
 
             ctx = webrtc_streamer(
-                key=f"science-fair-camera-v8-auto-live-{st.session_state['science_camera_facing']}",
+                key=(
+                    "science-fair-camera-v9-auto-live-"
+                    f"{st.session_state['science_camera_facing']}-"
+                    f"{st.session_state['science_camera_generation']}"
+                ),
                 mode=WebRtcMode.SENDONLY,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
@@ -1296,7 +1289,9 @@ if active_view == navigation_options[2]:
                         "width": {"ideal": 640, "min": 320},
                         "height": {"ideal": 480, "min": 240},
                         "frameRate": {"ideal": 15, "max": 20},
-                        "facingMode": {"ideal": st.session_state["science_camera_facing"]},
+                        # exact forces a fresh getUserMedia request to use the
+                        # selected mobile camera after the old track is stopped.
+                        "facingMode": {"exact": st.session_state["science_camera_facing"]},
                     },
                     "audio": False,
                 },
@@ -1304,6 +1299,43 @@ if active_view == navigation_options[2]:
                 media_toggle_controls=False,
                 async_processing=True,
             )
+
+            if ctx is not None and ctx.state.playing:
+                switch_col, info_col = st.columns([.34, .66], gap="small")
+                with switch_col:
+                    if st.button(
+                        "↔ SWITCH CAMERA",
+                        key="science-switch-camera",
+                        use_container_width=True,
+                    ):
+                        # Release the current media track before mounting the
+                        # new facing-mode WebRTC instance.
+                        try:
+                            ctx.stop()
+                        except Exception:
+                            pass
+                        st.session_state["live_scan_state"].reset()
+                        st.session_state["live_last_inference"] = 0.0
+                        st.session_state["live_last_frame_at"] = 0.0
+                        st.session_state["science_camera_facing"] = (
+                            "user"
+                            if st.session_state["science_camera_facing"] == "environment"
+                            else "environment"
+                        )
+                        st.session_state["science_camera_generation"] += 1
+                        st.session_state["live_scan_resume_at"] = time.monotonic() + 0.8
+                        st.session_state["science_last_beep_result"] = None
+                        st.rerun()
+                with info_col:
+                    st.caption(
+                        "Switches between rear and front camera. The current stream is "
+                        "stopped first so mobile browsers release the camera correctly."
+                    )
+            else:
+                st.caption(
+                    "Press START, allow camera permission, then use SWITCH CAMERA "
+                    "to change between rear and front cameras."
+                )
 
             if ctx is not None and ctx.state.playing:
                 pass
