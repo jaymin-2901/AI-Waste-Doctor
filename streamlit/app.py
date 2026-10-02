@@ -26,6 +26,12 @@ LIVE_DECISION_HOLD_SECONDS = 1.0
 LIVE_SCENE_CHANGE_THRESHOLD = 18.0
 LIVE_SCENE_CHANGE_HITS = 3
 LIVE_ERROR_COOLDOWN = 6.0
+LIVE_INFERENCE_INTERVAL = 0.90
+LIVE_INITIAL_SETTLE_SECONDS = 0.75
+LIVE_DECISION_HOLD_SECONDS = 1.0
+LIVE_SCENE_CHANGE_THRESHOLD = 18.0
+LIVE_SCENE_CHANGE_HITS = 3
+LIVE_ERROR_COOLDOWN = 6.0
 CATEGORY_COLORS = {
     "Recyclable": "#FBBF24",
     "Dry Waste": "#60A5FA",
@@ -290,6 +296,36 @@ def _scene_change_score(reference_frame, current_frame):
         return 0.0
 
 
+def _scan_zone_gray(frame):
+    """Normalize the classifier scan zone for local scene-change detection."""
+    height, width = frame.shape[:2]
+    box_size = max(32, int(min(width, height) * 0.60))
+    left = max(0, (width - box_size) // 2)
+    top = max(0, (height - box_size) // 2)
+    crop = frame[top:top + box_size, left:left + box_size]
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, (96, 96), interpolation=cv2.INTER_AREA)
+    return cv2.GaussianBlur(gray, (5, 5), 0)
+
+
+def _scene_change_score(reference_frame, current_frame):
+    """Detect replacement/removal of an object; never chooses its waste class."""
+    if reference_frame is None or current_frame is None:
+        return 0.0
+    try:
+        reference = _scan_zone_gray(reference_frame)
+        current = _scan_zone_gray(current_frame)
+        pixel_delta = float(cv2.absdiff(reference, current).mean())
+        ref_edges = cv2.Canny(reference, 60, 140)
+        cur_edges = cv2.Canny(current, 60, 140)
+        edge_delta = float(
+            cv2.absdiff(ref_edges, cur_edges).mean() / 255.0 * 100.0
+        )
+        return pixel_delta + 0.20 * edge_delta
+    except Exception:
+        return 0.0
+
+
 def render_live_inference(ctx):
     """Continuously classify the camera object and automatically re-arm."""
     processor = ctx.video_processor if ctx is not None else None
@@ -299,9 +335,8 @@ def render_live_inference(ctx):
 
     live_state = st.session_state["live_scan_state"]
 
-    # This loop is deliberately a normal Streamlit polling loop. It avoids
-    # st.fragment callbacks, which previously raced with WebRTC component
-    # teardown and deleted session-state keys.
+    # Normal Streamlit polling is used intentionally. No fragment callbacks
+    # are used, avoiding the stale WebRTC/session-state callback race.
     last_inference = 0.0
     last_frame_at = 0.0
     error_until = 0.0
@@ -341,8 +376,6 @@ def render_live_inference(ctx):
                 caption="Automatic live scan · keep one object inside the green box",
             )
 
-        # Once a decision is final, pause API calls. Local vision watches for a
-        # persistent change, then automatically clears the decision.
         if live_state.committed_result is not None:
             if decision_reference is None and frame is not None:
                 decision_reference = frame.copy()
@@ -432,9 +465,7 @@ def render_live_inference(ctx):
                         f"{snapshot.confidence:.1f}% · "
                         "replace/remove the object for automatic next scan"
                     )
-                    st.toast(
-                        f"DECISION COMMITTED · {snapshot.top_class}"
-                    )
+                    st.toast(f"DECISION COMMITTED · {snapshot.top_class}")
                 elif snapshot.is_confident:
                     status_slot.warning(
                         f"AUTO STABILITY · {snapshot.consecutive_frames}/3 · "
