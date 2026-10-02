@@ -564,19 +564,6 @@ st.markdown(
     .science-camera-status strong {
         color: var(--accent);
     }
-    .science-camera-switch button {
-        min-height: 44px !important;
-        width: 44px !important;
-        min-width: 44px !important;
-        padding: 0 !important;
-        border-radius: 50% !important;
-        font-size: 1.25rem !important;
-        font-weight: 950 !important;
-        color: #071008 !important;
-        background: var(--accent) !important;
-        border-color: var(--accent) !important;
-        box-shadow: 0 8px 20px rgba(182,255,46,.20);
-    }
     .science-header .science-chip {
         color: #f8fafc;
         background: #18222d;
@@ -809,12 +796,6 @@ if "live_inference_in_flight" not in st.session_state:
     st.session_state["live_inference_in_flight"] = False
 if "science_sound_enabled" not in st.session_state:
     st.session_state["science_sound_enabled"] = True
-if "science_camera_facing" not in st.session_state:
-    st.session_state["science_camera_facing"] = "environment"
-if "science_camera_generation" not in st.session_state:
-    st.session_state["science_camera_generation"] = 0
-if "science_sound_unlocked" not in st.session_state:
-    st.session_state["science_sound_unlocked"] = False
 if "science_reference_signature" not in st.session_state:
     st.session_state["science_reference_signature"] = None
 if "science_reference_result" not in st.session_state:
@@ -1099,15 +1080,13 @@ def _classification_beep_audio():
 
 
 def play_classification_beep(event_id):
-    """Play the completion beep after the user has unlocked browser audio."""
+    """Play the exact science-fair decision beep when a final result appears."""
     if not st.session_state.get("science_sound_enabled", True):
         return
-    if not st.session_state.get("science_sound_unlocked", False):
-        return
 
-    # The explicit SOUND ON button is a real user gesture. This makes the
-    # subsequent autoplay notification work on desktop and mobile browsers
-    # that otherwise block scripted audio.
+    # This WAV is the 0.24-second 880 Hz -> 660 Hz confirmation beep used by
+    # the Science Fair presentation. It is rendered with autoplay immediately
+    # when the final decision is displayed.
     st.audio(
         _classification_beep_audio(),
         format="audio/wav",
@@ -1195,7 +1174,7 @@ def render_prediction(result):
 
 if science_mode:
     navigation_options = ["🎪  SCIENCE FAIR"]
-    st.session_state["active_view"] = navigation_options[0]
+    st.session_state["active_view"] = "🎪  SCIENCE FAIR"
 else:
     navigation_options = ["📁  UPLOAD IMAGE", "📹  LIVE CAMERA", "🎪  SCIENCE FAIR", "💡  HOW IT WORKS", "⚙️  SETTINGS"]
 
@@ -1207,7 +1186,7 @@ active_view = st.radio(
     key="active_view",
 )
 
-if active_view == navigation_options[0]:
+if active_view == "📁  UPLOAD IMAGE":
     left, right = st.columns([1.05, .95], gap="large")
     with left:
         st.markdown('<p class="panel-label">IMAGE SCAN</p>', unsafe_allow_html=True)
@@ -1230,11 +1209,10 @@ if active_view == navigation_options[0]:
         st.markdown('<p class="panel-label">AI PREDICTION</p>', unsafe_allow_html=True)
         render_prediction(st.session_state["result"])
 
-if active_view == navigation_options[1]:
+if active_view == "📹  LIVE CAMERA":
     left, right = st.columns([1.05, .95], gap="large")
     with left:
         st.markdown('<p class="panel-label">CAMERA SCAN</p>', unsafe_allow_html=True)
-        st.info("Mobile tip: use your browser camera switch control to choose front or rear camera.")
         camera_file = st.camera_input("Capture a waste object", label_visibility="collapsed")
         if camera_file and st.button("CLASSIFY CAPTURE", type="primary", width="stretch"):
             status_box = st.empty()
@@ -1249,7 +1227,7 @@ if active_view == navigation_options[1]:
         st.markdown('<p class="panel-label">LIVE RESULT</p>', unsafe_allow_html=True)
         render_prediction(st.session_state["result"])
 
-if active_view == navigation_options[2]:
+if active_view == "🎪  SCIENCE FAIR":
     st.markdown(
         '<div class="science-header"><p class="science-title">AI WASTE DOCTOR</p>'
         '<span class="science-chip">AUTO → CLASSIFY → SORT</span>'
@@ -1258,28 +1236,7 @@ if active_view == navigation_options[2]:
         unsafe_allow_html=True,
     )
     st.markdown('<p class="science-footer">Science Fair Auto Live Mode · camera starts once · AI decides automatically · new objects re-arm automatically</p>', unsafe_allow_html=True)
-    sound_col, sound_status_col = st.columns([.34, .66], gap="small")
-    with sound_col:
-        if st.button(
-            "🔊 ENABLE / TEST BEEP",
-            key="science-enable-sound",
-            type="secondary",
-            use_container_width=True,
-        ):
-            st.session_state["science_sound_enabled"] = True
-            st.session_state["science_sound_unlocked"] = True
-            st.session_state["science_last_beep_result"] = None
-            st.session_state["science_beep_id"] += 1
-            st.audio(
-                _classification_beep_audio(),
-                format="audio/wav",
-                autoplay=True,
-            )
-    with sound_status_col:
-        if st.session_state.get("science_sound_unlocked", False):
-            st.caption("🔊 BEEP ENABLED · classification alerts work on desktop and mobile browsers.")
-        else:
-            st.caption("🔇 Tap ENABLE / TEST BEEP once on each device so the browser allows automatic classification sounds.")
+    st.caption("🔊 Decision alert sound is enabled for final classifications.")
     fullscreen_button_html = """
     <button
       onclick="(() => {
@@ -1315,14 +1272,8 @@ if active_view == navigation_options[2]:
             else:
                 st.caption("NETWORK: Cloudflare TURN/TCP relay · one-way camera transport")
 
-            camera_facing = st.session_state["science_camera_facing"]
-            camera_label = "REAR CAMERA" if camera_facing == "environment" else "FRONT CAMERA"
-
             ctx = webrtc_streamer(
-                key=(
-                    "science-fair-camera-v11-"
-                    f"{camera_facing}-{st.session_state['science_camera_generation']}"
-                ),
+                key="science-fair-camera-v12-auto-live",
                 mode=WebRtcMode.SENDONLY,
                 rtc_configuration=rtc_configuration,
                 video_processor_factory=LiveVideoProcessor,
@@ -1333,7 +1284,7 @@ if active_view == navigation_options[2]:
                         "frameRate": {"ideal": 15, "max": 20},
                         # "ideal" requests the selected mobile camera without
                         # rejecting devices that expose different constraints.
-                        "facingMode": {"ideal": camera_facing},
+                        "facingMode": {"ideal": "environment"},
                     },
                     "audio": False,
                 },
@@ -1342,33 +1293,10 @@ if active_view == navigation_options[2]:
                 async_processing=True,
             )
 
-            camera_col, status_col = st.columns([.16, .84], gap="small")
-            with camera_col:
-                if st.button(
-                    "↔",
-                    key="science-camera-switch",
-                    help="Switch between the rear and front camera",
-                    use_container_width=True,
-                ):
-                    try:
-                        ctx.stop()
-                    except Exception:
-                        pass
-                    st.session_state["live_scan_state"].reset()
-                    st.session_state["live_last_inference"] = 0.0
-                    st.session_state["live_last_frame_at"] = 0.0
-                    st.session_state["science_last_beep_result"] = None
-                    st.session_state["science_camera_facing"] = (
-                        "user" if camera_facing == "environment" else "environment"
-                    )
-                    st.session_state["science_camera_generation"] += 1
-                    st.session_state["live_scan_resume_at"] = time.monotonic() + 1.0
-                    st.rerun()
-            with status_col:
-                st.markdown(
-                    f'<div class="science-camera-toolbar"><div class="science-camera-status">ACTIVE: <strong>{camera_label}</strong> · TAP ↔ TO SWITCH</div></div>',
-                    unsafe_allow_html=True,
-                )
+            st.markdown(
+                '<div class="science-camera-toolbar"><div class="science-camera-status">ACTIVE: <strong>REAR CAMERA</strong> · AUTO LIVE DETECTION</div></div>',
+                unsafe_allow_html=True,
+            )
 
             if ctx is None or not ctx.state.playing:
                 st.caption("Press START and allow camera permission. The rear camera is selected first.")
