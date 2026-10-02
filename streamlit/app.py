@@ -1055,18 +1055,20 @@ def play_classification_beep(event_id):
     """Play a short browser-side success beep without touching the backend."""
     if not st.session_state.get("science_sound_enabled", True):
         return
-    components.html(
-        f"""
+
+    # Keep this HTML as a normal string rather than an f-string so JavaScript
+    # braces can never trigger Python f-string parsing errors.
+    beep_html = """
         <script>
-        (() => {{
-          const key = "ai-waste-doctor-beep-{event_id}";
+        (() => {
+          const key = "ai-waste-doctor-beep-__EVENT_ID__";
           if (window.sessionStorage.getItem(key)) return;
           window.sessionStorage.setItem(key, "1");
-          try {{
+          try {
             const AudioCtx = window.AudioContext || window.webkitAudioContext;
             if (!AudioCtx) return;
             const ctx = new AudioCtx();
-            const start = () => {{
+            const start = () => {
               const now = ctx.currentTime;
               const gain = ctx.createGain();
               gain.gain.setValueAtTime(0.0001, now);
@@ -1080,14 +1082,17 @@ def play_classification_beep(event_id):
               osc.start(now);
               osc.stop(now + 0.23);
             };
-            if (ctx.state === "suspended") {{ ctx.resume().then(start).catch(() => {{}}); }}
-            else start();
-          }} catch (e) {{}}
-        }})();
+            if (ctx.state === "suspended") {
+              ctx.resume().then(start).catch(() => {});
+            } else {
+              start();
+            }
+          } catch (e) {}
+        })();
         </script>
-        """,
-        height=0,
-    )
+    """.replace("__EVENT_ID__", str(event_id))
+
+    components.html(beep_html, height=0)
 
 
 def render_science_prediction(result, final_class):
