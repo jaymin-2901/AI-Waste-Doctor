@@ -627,7 +627,7 @@ class WasteClassifier:
             return dry_appearance_hint
 
         try:
-            view_scales = (0.60, 0.76, 0.90, 1.0)
+            view_scales = (0.72, 0.96)
             batches = []
             boxes = []
             for scale in view_scales:
