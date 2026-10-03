@@ -291,10 +291,10 @@ class WasteClassifier:
             pale_near_red = float(np.mean((pale > 0) & (near_red > 0)))
 
             red_apple_like = (
-                red_ratio >= 0.025
-                and red_component_ratio >= 0.035
-                and red_fill >= 0.20
-                and pale_near_red >= 0.035
+                red_ratio >= 0.015
+                and red_component_ratio >= 0.008
+                and red_fill >= 0.10
+                and pale_near_red >= 0.040
             )
             whole_fruit_like = (
                 produce_ratio >= 0.045
