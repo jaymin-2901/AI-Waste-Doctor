@@ -22,7 +22,7 @@ from api_client import ClassificationError, classify_image
 from live_scan import LiveScanState, LiveVideoProcessor
 
 DEFAULT_API_URL = "https://ai-waste-doctor-api.onrender.com"
-EXPECTED_API_BUILD = "2026-10-03-science-fair-food-guard-v4"
+EXPECTED_API_BUILD = "2026-10-03-science-fair-material-guard-v5"
 LIVE_INFERENCE_INTERVAL = 0.90
 LIVE_INITIAL_SETTLE_SECONDS = 0.75
 LIVE_DECISION_HOLD_SECONDS = 1.0
@@ -987,9 +987,13 @@ def render_live_inference(ctx):
             unsafe_allow_html=True,
         )
 
+        correction = ""
+        if final.get("semantic_guard_applied"):
+            hint = final.get("semantic_hint") or {}
+            correction = f" · object cross-check: {hint.get('label', 'material')} → {final.get('top_class', 'Unknown')}"
         status_slot.success(
-            f"FINAL DECISION · {final.get('top_class', 'Unknown')} · {confidence_text} "
-            "(stable trained-model result)"
+            f"FINAL DECISION · {final.get('top_class', 'Unknown')} · {confidence_text}"
+            f"{correction}"
         )
 
         beep_signature = final.get("top_class", "") + "|" + str(final.get("top_confidence", ""))
