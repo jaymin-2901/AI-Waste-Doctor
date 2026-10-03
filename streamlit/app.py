@@ -823,6 +823,10 @@ if "science_last_beep_result" not in st.session_state:
     st.session_state["science_last_beep_result"] = None
 if "science_beep_id" not in st.session_state:
     st.session_state["science_beep_id"] = 0
+if "science_camera_seen_playing" not in st.session_state:
+    st.session_state["science_camera_seen_playing"] = False
+if "science_camera_reconnect_until" not in st.session_state:
+    st.session_state["science_camera_reconnect_until"] = 0.0
 
 api_url = st.session_state["api_url"]
 mobile_browser = _is_mobile_browser()
@@ -938,8 +942,24 @@ def _scene_change_score(reference_frame, current_frame):
 
 def render_live_inference(ctx):
     """Run one automatic live-scan cycle; reruns keep the camera alive."""
-    processor = ctx.video_processor if ctx is not None else None
+    processor = getattr(ctx, "video_processor", None) if ctx is not None else None
     if processor is None:
+        # streamlit-webrtc can briefly expose no Python processor during the
+        # Streamlit rerun triggered by RESUME SCAN, while the browser camera
+        # itself is still running. Do not turn that transient state into a
+        # "START CAMERA" state. Wait for the processor to reattach.
+        reconnect_until = float(
+            st.session_state.get("science_camera_reconnect_until", 0.0)
+        )
+        if (
+            st.session_state.get("science_camera_seen_playing", False)
+            and time.monotonic() < reconnect_until
+        ):
+            st.info("CAMERA ACTIVE · reconnecting AI scanner for the next object…")
+            time.sleep(0.18)
+            st.rerun()
+
+        st.session_state["science_camera_seen_playing"] = False
         st.info("Start the camera once to begin automatic live detection.")
         return
 
@@ -1013,6 +1033,14 @@ def render_live_inference(ctx):
             st.session_state["live_last_frame_at"] = 0.0
             st.session_state["live_service_checked"] = True
             st.session_state["live_scan_resume_at"] = time.monotonic() + 0.6
+
+            # Preserve camera intent across the rerun. WebRTC may need a
+            # short moment to reconnect its Python-side processor.
+            st.session_state["science_camera_seen_playing"] = True
+            st.session_state["science_camera_reconnect_until"] = (
+                time.monotonic() + 6.0
+            )
+
             st.session_state["science_last_beep_result"] = None
             st.rerun()
 
@@ -1352,10 +1380,37 @@ if active_view == "🎪  SCIENCE FAIR":
         if reference_result is not None:
             st.markdown('<div class="science-status">REFERENCE IMAGE RESULT · AUTOMATIC CLASSIFICATION</div>', unsafe_allow_html=True)
             render_prediction(reference_result)
-        if ctx is None or not ctx.state.playing:
-            st.markdown('<div class="science-decision uncertain"><h2>SCANNING OBJECT</h2><p>START CAMERA TO BEGIN</p></div>', unsafe_allow_html=True)
-            st.caption("Press START once and allow camera access. Then place an object in the green box; classification is automatic.")
+        camera_playing = bool(
+            ctx is not None
+            and getattr(getattr(ctx, "state", None), "playing", False)
+        )
+        processor_ready = bool(
+            ctx is not None
+            and getattr(ctx, "video_processor", None) is not None
+        )
+
+        if camera_playing or processor_ready:
+            st.session_state["science_camera_seen_playing"] = True
+
+        camera_was_active = st.session_state.get(
+            "science_camera_seen_playing", False
+        )
+
+        if ctx is None or (
+            not camera_playing
+            and not processor_ready
+            and not camera_was_active
+        ):
+            st.markdown(
+                '<div class="science-decision uncertain"><h2>SCANNING OBJECT</h2><p>START CAMERA TO BEGIN</p></div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Press START once and allow camera access. Then place an object "
+                "in the green box; classification is automatic."
+            )
         else:
+            # Includes the short reconnect period immediately after RESUME SCAN.
             render_live_inference(ctx)
 
 if active_view == navigation_options[3]:
