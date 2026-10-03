@@ -1,10 +1,11 @@
 """AI Waste Doctor classification engine.
 
-The trained 3-class waste model remains the primary classifier.  A lightweight
-ImageNet MobileNetV2 cross-check is used only when the waste model predicts a
-non-wet class.  The cross-check is object-centric and evaluates several nested
-center crops so a fruit placed inside a bowl does not get lost in background or
-container pixels.
+The trained three-class waste model is the primary classifier.  Science Fair
+mode additionally uses an object-centric ImageNet MobileNetV2 second opinion.
+The second opinion is deliberately conservative: it can promote strong food
+evidence to Wet Waste and can demote a clearly recognized bottle/plastic/electronic
+object away from Wet Waste.  This prevents a single bad 3-class prediction from
+being presented as a confident final bin decision.
 """
 
 import os
@@ -35,10 +36,10 @@ except ImportError:
     TF_AVAILABLE = False
 
 
-# Keras / ImageNet output indices.  The produce block is contiguous in the
-# canonical ImageNet-1K class ordering used by MobileNetV2.
-# 936..957 = head cabbage .. pomegranate.
-IMAGENET_WET_CLASS_MAP = {
+# MobileNetV2/ImageNet-1K indices.  These are used only as a second opinion;
+# the trained waste model still supplies the application probabilities.
+IMAGENET_CLASS_MAP = {
+    # food / produce
     924: "guacamole",
     925: "consomme",
     926: "hot pot",
@@ -78,32 +79,25 @@ IMAGENET_WET_CLASS_MAP = {
     963: "pizza",
     964: "potpie",
     965: "burrito",
+    # strong non-wet object signals
+    487: "cellular telephone",
+    508: "computer keyboard",
+    620: "laptop",
+    664: "monitor",
+    675: "computer mouse",
+    725: "plastic bag",
+    734: "pop bottle",
+    741: "remote control",
+    898: "water bottle",
 }
 
 PRODUCE_INDICES = tuple(range(936, 958))
-COOKED_FOOD_INDICES = (
-    924,
-    925,
-    926,
-    927,
-    928,
-    929,
-    930,
-    931,
-    932,
-    933,
-    934,
-    935,
-    959,
-    962,
-    963,
-    964,
-    965,
-)
+COOKED_FOOD_INDICES = (924, 925, 926, 927, 928, 929, 930, 931, 932, 933, 934, 935, 959, 962, 963, 964, 965)
+RECYCLABLE_OBJECT_INDICES = (487, 508, 620, 664, 675, 725, 734, 741, 898)
 
 
 class WasteClassifier:
-    """Three-class waste classifier with an object-centric food cross-check."""
+    """Three-class waste classifier with conservative semantic cross-checks."""
 
     def __init__(
         self,
@@ -113,16 +107,8 @@ class WasteClassifier:
         confidence_threshold=70.0,
     ):
         self.base_dir = Path(__file__).resolve().parent.parent
-        self.model_path = (
-            Path(model_path)
-            if model_path
-            else self.base_dir / "model" / "keras_model.h5"
-        )
-        self.labels_path = (
-            Path(labels_path)
-            if labels_path
-            else self.base_dir / "model" / "labels.txt"
-        )
+        self.model_path = Path(model_path) if model_path else self.base_dir / "model" / "keras_model.h5"
+        self.labels_path = Path(labels_path) if labels_path else self.base_dir / "model" / "labels.txt"
 
         self.labels = []
         self.model = None
@@ -137,7 +123,7 @@ class WasteClassifier:
         self.semantic_status = "disabled"
         self.semantic_error = ""
 
-        self.smoothing_frames = max(1, smoothing_frames)
+        self.smoothing_frames = max(1, int(smoothing_frames))
         self.confidence_threshold = float(confidence_threshold)
         self.history_buffer = deque(maxlen=self.smoothing_frames)
 
@@ -145,7 +131,6 @@ class WasteClassifier:
         self.load_model()
 
         if self.semantic_guard_enabled and TF_AVAILABLE:
-            # Lazy-load the ImageNet helper only when a scan actually needs it.
             self.semantic_status = "lazy"
 
     def set_smoothing_frames(self, frames: int):
@@ -166,17 +151,12 @@ class WasteClassifier:
                 parsed = []
                 for line in lines:
                     parts = line.split(" ", 1)
-                    parsed.append(
-                        parts[1].strip()
-                        if len(parts) > 1 and parts[0].isdigit()
-                        else line
-                    )
+                    parsed.append(parts[1].strip() if len(parts) > 1 and parts[0].isdigit() else line)
                 self.labels = parsed or ["Recyclable", "Dry Waste", "Wet Waste"]
                 print(f"[Classifier] Loaded labels: {self.labels}")
                 return
             except Exception as error:
                 print(f"[Classifier] Error loading labels: {error}")
-
         self.labels = ["Recyclable", "Dry Waste", "Wet Waste"]
         print("[Classifier] Using default labels.")
 
@@ -187,9 +167,7 @@ class WasteClassifier:
             return
 
         saved_model_dir = self.model_path.parent / "saved_model"
-        candidates = [self.model_path, saved_model_dir]
-
-        for candidate in candidates:
+        for candidate in (self.model_path, saved_model_dir):
             if not candidate.exists():
                 continue
             try:
@@ -206,7 +184,7 @@ class WasteClassifier:
         self.status_message = "MODEL NOT FOUND - Running in Demo Mode."
 
     def load_semantic_model(self):
-        """Load a small pretrained ImageNet recognizer used as a second opinion."""
+        """Load the small ImageNet recognizer used only as a second opinion."""
         if not self.semantic_guard_enabled:
             self.semantic_status = "disabled"
             return
@@ -214,7 +192,6 @@ class WasteClassifier:
             self.semantic_status = "unavailable"
             self.semantic_error = "TensorFlow is not installed."
             return
-
         try:
             self.semantic_model = tf.keras.applications.MobileNetV2(
                 input_shape=(160, 160, 3),
@@ -225,12 +202,12 @@ class WasteClassifier:
             )
             self.semantic_model.trainable = False
             self.semantic_status = "ready"
-            print("[Classifier] Object-centric ImageNet food guard is ready.")
+            print("[Classifier] ImageNet object cross-check is ready.")
         except Exception as error:
             self.semantic_model = None
             self.semantic_status = "unavailable"
             self.semantic_error = str(error)
-            print(f"[Classifier] Food guard unavailable: {error}")
+            print(f"[Classifier] Object cross-check unavailable: {error}")
 
     def _wet_label_index(self):
         for index, label in enumerate(self.labels):
@@ -239,47 +216,49 @@ class WasteClassifier:
                 return index
         return None
 
+    def _recyclable_label_index(self):
+        for index, label in enumerate(self.labels):
+            normalized = label.strip().lower()
+            if normalized == "recyclable" or "recycle" in normalized:
+                return index
+        return None
+
     @staticmethod
     def _probability_row(values):
         values = np.asarray(values, dtype=np.float32).reshape(-1)
         if values.size == 0 or not np.all(np.isfinite(values)):
             raise ValueError("Model returned invalid prediction values")
-
         if np.all(values >= 0) and np.isclose(float(values.sum()), 1.0, atol=1e-3):
             return values
-
         shifted = values - np.max(values)
         exp_values = np.exp(shifted)
         return exp_values / np.sum(exp_values)
 
     @staticmethod
     def _scaled_crop_box(frame, crop_box, scale):
-        """Scale a crop around its own center while remaining inside the frame."""
         height, width = frame.shape[:2]
-
         if crop_box is None:
             base_x, base_y, base_w, base_h = 0, 0, width, height
         else:
             base_x, base_y, base_w, base_h = crop_box
 
-        center_x = base_x + (base_w / 2.0)
-        center_y = base_y + (base_h / 2.0)
+        center_x = base_x + base_w / 2.0
+        center_y = base_y + base_h / 2.0
         side = int(max(32, min(base_w, base_h) * float(scale)))
         side = min(side, width, height)
-
         x = int(round(center_x - side / 2.0))
         y = int(round(center_y - side / 2.0))
         x = max(0, min(x, width - side))
         y = max(0, min(y, height - side))
-        return (x, y, side, side)
+        return x, y, side, side
 
-    def _semantic_food_hint(self, frame, crop_box, base_probs):
-        """Evaluate food/produce evidence on several nested object-centric crops."""
+    def _semantic_hint(self, frame, crop_box, base_probs):
+        """Run several center crops and collect strong food/non-food evidence."""
         if self.semantic_model is None:
             return None
 
         try:
-            view_scales = (0.68, 0.84, 1.0)
+            view_scales = (0.60, 0.76, 0.90, 1.0)
             batches = []
             boxes = []
             for scale in view_scales:
@@ -293,9 +272,11 @@ class WasteClassifier:
                 batches.append(batch[0])
                 boxes.append(box)
 
-            semantic_batch = np.stack(batches, axis=0).astype(np.float32)
             outputs = np.asarray(
-                self.semantic_model(semantic_batch, training=False).numpy(),
+                self.semantic_model(
+                    np.stack(batches, axis=0).astype(np.float32),
+                    training=False,
+                ).numpy(),
                 dtype=np.float32,
             )
             if outputs.ndim != 2 or outputs.shape[1] < 966:
@@ -308,15 +289,15 @@ class WasteClassifier:
         wet_index = self._wet_label_index()
         base_wet = float(base_probs[wet_index]) if wet_index is not None else 0.0
 
-        view_details = []
-        best_produce_candidate = None
-        best_produce_score = 0.0
-        best_food_candidate = None
-        best_food_score = 0.0
+        best_produce = (None, 0.0)
+        best_food = (None, 0.0)
+        best_recyclable = (None, 0.0)
         max_produce_mass = 0.0
         max_food_mass = 0.0
-        produce_supporting_views = 0
-        food_supporting_views = 0
+        max_recyclable_mass = 0.0
+        produce_views = 0
+        recyclable_views = 0
+        details = []
 
         for view_index, row in enumerate(outputs):
             produce_mass = float(np.sum(row[list(PRODUCE_INDICES)]))
@@ -324,145 +305,165 @@ class WasteClassifier:
                 np.sum(row[list(PRODUCE_INDICES)])
                 + np.sum(row[list(COOKED_FOOD_INDICES)])
             )
+            recyclable_mass = float(np.sum(row[list(RECYCLABLE_OBJECT_INDICES)]))
 
-            produce_scores = [
-                (index, float(row[index])) for index in PRODUCE_INDICES
-            ]
-            cooked_scores = [
-                (index, float(row[index])) for index in COOKED_FOOD_INDICES
-            ]
-            local_produce_index, local_produce_score = max(
-                produce_scores,
+            produce_idx, produce_score = max(
+                ((i, float(row[i])) for i in PRODUCE_INDICES),
                 key=lambda item: item[1],
             )
-            local_food_index, local_food_score = max(
-                cooked_scores,
+            food_idx, food_score = max(
+                ((i, float(row[i])) for i in COOKED_FOOD_INDICES),
+                key=lambda item: item[1],
+            )
+            recyclable_idx, recyclable_score = max(
+                ((i, float(row[i])) for i in RECYCLABLE_OBJECT_INDICES),
                 key=lambda item: item[1],
             )
 
-            if local_produce_score > best_produce_score:
-                best_produce_score = local_produce_score
-                best_produce_candidate = local_produce_index
-            if local_food_score > best_food_score:
-                best_food_score = local_food_score
-                best_food_candidate = local_food_index
+            if produce_score > best_produce[1]:
+                best_produce = (produce_idx, produce_score)
+            if food_score > best_food[1]:
+                best_food = (food_idx, food_score)
+            if recyclable_score > best_recyclable[1]:
+                best_recyclable = (recyclable_idx, recyclable_score)
 
             max_produce_mass = max(max_produce_mass, produce_mass)
             max_food_mass = max(max_food_mass, food_mass)
-            if produce_mass >= 0.045:
-                produce_supporting_views += 1
-            if food_mass >= 0.08:
-                food_supporting_views += 1
+            max_recyclable_mass = max(max_recyclable_mass, recyclable_mass)
 
-            top_produce = sorted(
-                produce_scores,
+            if produce_mass >= 0.045:
+                produce_views += 1
+            if recyclable_mass >= 0.12:
+                recyclable_views += 1
+
+            top_objects = sorted(
+                [(i, float(row[i])) for i in set(PRODUCE_INDICES) | set(RECYCLABLE_OBJECT_INDICES)],
                 key=lambda item: item[1],
                 reverse=True,
-            )[:3]
-            view_details.append(
-                {
-                    "scale": view_scales[view_index],
-                    "crop_box": boxes[view_index],
-                    "produce_mass": round(produce_mass * 100.0, 1),
-                    "food_mass": round(food_mass * 100.0, 1),
-                    "top_produce": [
-                        {
-                            "label": IMAGENET_WET_CLASS_MAP[index],
-                            "confidence": round(score * 100.0, 1),
-                        }
-                        for index, score in top_produce
-                    ],
-                }
-            )
+            )[:4]
+            details.append({
+                "scale": view_scales[view_index],
+                "crop_box": boxes[view_index],
+                "produce_mass": round(produce_mass * 100.0, 1),
+                "food_mass": round(food_mass * 100.0, 1),
+                "recyclable_mass": round(recyclable_mass * 100.0, 1),
+                "top_objects": [
+                    {
+                        "label": IMAGENET_CLASS_MAP.get(index, str(index)),
+                        "confidence": round(score * 100.0, 1),
+                    }
+                    for index, score in top_objects
+                ],
+            })
 
-        produce_match = bool(
-            best_produce_candidate is not None
-            and (
-                best_produce_score >= 0.060
-                or (
-                    best_produce_score >= 0.015
-                    and max_produce_mass >= 0.080
-                    and base_wet >= 0.08
-                )
-                or (
-                    best_produce_score >= 0.010
-                    and max_produce_mass >= 0.050
-                    and produce_supporting_views >= 2
-                    and base_wet >= 0.10
-                )
-            )
+        produce_match = (
+            best_produce[1] >= 0.10
+            or (best_produce[1] >= 0.045 and max_produce_mass >= 0.12 and produce_views >= 2)
+            or (best_produce[1] >= 0.025 and max_produce_mass >= 0.18 and base_wet >= 0.08)
+        )
+        cooked_match = (
+            best_food[1] >= 0.18
+            or (best_food[1] >= 0.09 and max_food_mass >= 0.20 and base_wet >= 0.10)
         )
 
-        # Cooked-food recognition is intentionally stricter than produce so a
-        # printed pizza/burger image on packaging does not easily become Wet Waste.
-        cooked_food_match = bool(
-            best_food_candidate is not None
-            and (
-                best_food_score >= 0.14
-                or (
-                    best_food_score >= 0.065
-                    and max_food_mass >= 0.16
-                    and food_supporting_views >= 2
-                    and base_wet >= 0.14
-                )
-            )
+        # Require strong object evidence before overriding a Wet Waste prediction.
+        # This specifically handles plastic bottles, bags and common electronics.
+        recyclable_match = (
+            best_recyclable[1] >= 0.38
+            or (best_recyclable[1] >= 0.25 and max_recyclable_mass >= 0.45 and recyclable_views >= 2)
+            or (best_recyclable[1] >= 0.32 and base_wet >= 0.45)
         )
 
-        best_candidate = (
-            best_produce_candidate if produce_match else best_food_candidate
-        )
-        best_candidate_score = (
-            best_produce_score if produce_match else best_food_score
-        )
-        best_label = (
-            IMAGENET_WET_CLASS_MAP.get(best_candidate)
-            if best_candidate is not None
-            else None
-        )
+        if produce_match or cooked_match:
+            candidate = best_produce if produce_match else best_food
+            return {
+                "matched": True,
+                "category": "Wet Waste",
+                "label": IMAGENET_CLASS_MAP.get(candidate[0]),
+                "confidence": round(candidate[1] * 100.0, 1),
+                "produce_mass": round(max_produce_mass * 100.0, 1),
+                "food_mass": round(max_food_mass * 100.0, 1),
+                "recyclable_mass": round(max_recyclable_mass * 100.0, 1),
+                "supporting_views": produce_views,
+                "base_wet_confidence": round(base_wet * 100.0, 1),
+                "direction": "wet",
+                "views": details,
+            }
 
-        matched = produce_match or cooked_food_match
+        if recyclable_match:
+            return {
+                "matched": True,
+                "category": "Recyclable",
+                "label": IMAGENET_CLASS_MAP.get(best_recyclable[0]),
+                "confidence": round(best_recyclable[1] * 100.0, 1),
+                "produce_mass": round(max_produce_mass * 100.0, 1),
+                "food_mass": round(max_food_mass * 100.0, 1),
+                "recyclable_mass": round(max_recyclable_mass * 100.0, 1),
+                "supporting_views": recyclable_views,
+                "base_wet_confidence": round(base_wet * 100.0, 1),
+                "direction": "recyclable",
+                "views": details,
+            }
+
         return {
-            "matched": matched,
-            "category": "Wet Waste" if matched else None,
-            "label": best_label,
-            "confidence": round(best_candidate_score * 100.0, 1),
+            "matched": False,
+            "category": None,
+            "label": None,
+            "confidence": 0.0,
             "produce_mass": round(max_produce_mass * 100.0, 1),
             "food_mass": round(max_food_mass * 100.0, 1),
-            "supporting_views": produce_supporting_views if produce_match else food_supporting_views,
+            "recyclable_mass": round(max_recyclable_mass * 100.0, 1),
+            "supporting_views": 0,
             "base_wet_confidence": round(base_wet * 100.0, 1),
-            "views": view_details,
+            "direction": None,
+            "views": details,
         }
 
-    def _apply_semantic_food_guard(self, raw_probs, hint):
+    def _apply_semantic_guard(self, raw_probs, hint):
         if not hint or not hint.get("matched"):
             return raw_probs, False
 
-        wet_index = self._wet_label_index()
-        if wet_index is None:
+        direction = hint.get("direction")
+        if direction == "wet":
+            target_index = self._wet_label_index()
+            minimum = 0.78
+            maximum = 0.94
+        elif direction == "recyclable":
+            target_index = self._recyclable_label_index()
+            minimum = 0.76
+            maximum = 0.93
+        else:
+            return raw_probs, False
+
+        if target_index is None:
             return raw_probs, False
 
         probs = np.asarray(raw_probs, dtype=np.float32)
         evidence = max(
             float(hint.get("confidence", 0.0)) / 100.0,
             float(hint.get("produce_mass", 0.0)) / 100.0,
+            float(hint.get("recyclable_mass", 0.0)) / 100.0,
         )
         base_wet = float(hint.get("base_wet_confidence", 0.0)) / 100.0
 
-        target_wet = min(0.94, max(0.78, 0.72 + 0.45 * evidence + 0.25 * base_wet))
-        remaining = 1.0 - target_wet
+        if direction == "wet":
+            target = min(maximum, max(minimum, 0.70 + 0.48 * evidence + 0.18 * base_wet))
+        else:
+            target = min(maximum, max(minimum, 0.70 + 0.40 * evidence))
 
-        other_indices = [index for index in range(len(probs)) if index != wet_index]
-        other_total = float(sum(probs[index] for index in other_indices))
+        remaining = 1.0 - target
+        other_indices = [i for i in range(len(probs)) if i != target_index]
+        other_total = float(sum(probs[i] for i in other_indices))
         if other_total > 0:
-            for index in other_indices:
-                probs[index] = (probs[index] / other_total) * remaining
+            for i in other_indices:
+                probs[i] = (probs[i] / other_total) * remaining
         elif other_indices:
             each = remaining / len(other_indices)
-            for index in other_indices:
-                probs[index] = each
+            for i in other_indices:
+                probs[i] = each
 
-        probs[wet_index] = target_wet
-        probs = probs / probs.sum()
+        probs[target_index] = target
+        probs /= probs.sum()
         return probs.tolist(), True
 
     def predict(self, frame, crop_box=None, normalization_mode="-1_to_1"):
@@ -490,23 +491,16 @@ class WasteClassifier:
                     )
                 raw_probs = self._probability_row(model_output).tolist()
 
-                base_top_index = int(np.argmax(raw_probs))
-                base_top_label = self.labels[base_top_index].strip().lower()
-                if (
-                    self.semantic_guard_enabled
-                    and base_top_label != "wet waste"
-                    and "organic" not in base_top_label
-                ):
+                # IMPORTANT: run the semantic guard for ALL base classes.
+                # The previous implementation skipped it when Wet Waste was
+                # already the top class, which allowed a false 90%+ Wet Waste
+                # prediction for a plastic bottle/electronic object.
+                if self.semantic_guard_enabled:
                     if self.semantic_model is None:
                         self.load_semantic_model()
-                    semantic_hint = self._semantic_food_hint(
-                        frame,
-                        crop_box,
-                        raw_probs,
-                    )
-                    raw_probs, semantic_applied = self._apply_semantic_food_guard(
-                        raw_probs,
-                        semantic_hint,
+                    semantic_hint = self._semantic_hint(frame, crop_box, raw_probs)
+                    raw_probs, semantic_applied = self._apply_semantic_guard(
+                        raw_probs, semantic_hint
                     )
             except Exception as error:
                 self.model_error = str(error)
@@ -535,10 +529,12 @@ class WasteClassifier:
 
         status = "OK" if is_confident else "UNCERTAIN – MOVE OBJECT CLOSER"
         if semantic_applied and semantic_hint:
-            status = (
-                "OK · FOOD CROSS-CHECK: "
-                f"{semantic_hint.get('label') or 'food/produce'} → Wet Waste"
-            )
+            direction = semantic_hint.get("direction")
+            label = semantic_hint.get("label") or "recognized object"
+            if direction == "wet":
+                status = f"OK · OBJECT CROSS-CHECK: {label} → Wet Waste"
+            elif direction == "recyclable":
+                status = f"OK · OBJECT CROSS-CHECK: {label} → Recyclable"
 
         return {
             "raw_predictions": raw_dict,
