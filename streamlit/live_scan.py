@@ -21,8 +21,7 @@ class LiveScanState:
 
     tracker: StableDecisionTracker = field(
         default_factory=lambda: StableDecisionTracker(
-            threshold=70.0,
-            required_frames=3,
+            threshold=72.0, required_frames=2, minimum_margin=15.0,
         )
     )
     latest_result: dict | None = None
