@@ -14,7 +14,7 @@ from ai.classifier import WasteClassifier
 app = FastAPI(title="AI Waste Doctor API", version="1.2.0")
 
 # Keep synchronized with streamlit/app.py -> EXPECTED_API_BUILD.
-API_BUILD = "2026-10-03-science-fair-cut-fruit-v7"
+API_BUILD = "2026-10-03-science-fair-object-guard-v8"
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
