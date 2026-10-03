@@ -82,9 +82,13 @@ IMAGENET_CLASS_MAP = {
     963: "pizza",
     964: "potpie",
     965: "burrito",
-    # strong non-wet object signals
+    # strong non-wet / recyclable / e-waste object signals
     487: "cellular telephone",
     508: "computer keyboard",
+    590: "hand-held computer",
+    592: "hard disk",
+    605: "iPod / portable electronic device",
+    613: "joystick",
     620: "laptop",
     664: "monitor",
     675: "computer mouse",
@@ -96,7 +100,9 @@ IMAGENET_CLASS_MAP = {
 
 PRODUCE_INDICES = tuple(range(936, 958))
 COOKED_FOOD_INDICES = (924, 925, 926, 927, 928, 929, 930, 931, 932, 933, 934, 935, 959, 962, 963, 964, 965)
-RECYCLABLE_OBJECT_INDICES = (487, 508, 620, 664, 675, 725, 734, 741, 898)
+RECYCLABLE_OBJECT_INDICES = (
+    487, 508, 590, 592, 605, 613, 620, 664, 675, 725, 734, 741, 898
+)
 
 
 class WasteClassifier:
@@ -276,12 +282,20 @@ class WasteClassifier:
                 cv2.inRange(hsv, (0, 55, 35), (18, 255, 255))
                 | cv2.inRange(hsv, (165, 55, 35), (179, 255, 255))
             )
+            # Cyan/teal plastic and electronics must never be treated as food
+            # solely because their color falls inside a broad green HSV range.
             produce_color = (
                 cv2.inRange(hsv, (20, 55, 45), (45, 255, 255))
-                | cv2.inRange(hsv, (45, 45, 35), (95, 255, 230))
+                | cv2.inRange(hsv, (45, 55, 35), (77, 255, 230))
             )
+            cyan_blue = cv2.inRange(hsv, (78, 35, 35), (125, 255, 255))
+
             red_ratio = float(np.mean(red > 0))
             produce_ratio = float(np.mean(produce_color > 0))
+            cyan_blue_ratio = float(np.mean(cyan_blue > 0))
+
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            edge_ratio = float(np.mean(cv2.Canny(gray, 60, 140) > 0))
 
             def largest_component(mask):
                 count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
@@ -323,9 +337,11 @@ class WasteClassifier:
                 and pale_near_red >= 0.040
             )
             whole_fruit_like = (
-                produce_ratio >= 0.045
-                and produce_component_ratio >= 0.045
-                and produce_fill >= 0.20
+                cyan_blue_ratio < 0.015
+                and produce_ratio >= 0.055
+                and produce_component_ratio >= 0.050
+                and produce_fill >= 0.24
+                and edge_ratio >= 0.024
             )
             if not (red_apple_like or whole_fruit_like):
                 return None
@@ -604,10 +620,9 @@ class WasteClassifier:
         appearance_hint = self._appearance_food_hint(frame, crop_box)
         cut_food_hint = self._appearance_cut_food_hint(frame, crop_box)
         dry_appearance_hint = self._appearance_dry_hint(frame, crop_box)
-        if appearance_hint and appearance_hint.get("matched"):
-            return appearance_hint
-        if cut_food_hint and cut_food_hint.get("matched"):
-            return cut_food_hint
+
+        # Never let color-only food heuristics bypass the trained model and
+        # ImageNet object semantics. This was the Science Fair false-Wet bug.
         if self.semantic_model is None:
             return dry_appearance_hint
 
@@ -638,7 +653,7 @@ class WasteClassifier:
         except Exception as error:
             self.semantic_error = str(error)
             print(f"[Classifier] Semantic inference skipped: {error}")
-            return appearance_hint or cut_food_hint or dry_appearance_hint
+            return dry_appearance_hint
 
         wet_index = self._wet_label_index()
         base_wet = float(base_probs[wet_index]) if wet_index is not None else 0.0
@@ -763,6 +778,13 @@ class WasteClassifier:
 
         if dry_appearance_hint and dry_appearance_hint.get("matched"):
             return dry_appearance_hint
+
+        # Offline food appearance may only override when the trained model
+        # independently gives meaningful Wet Waste support.
+        if cut_food_hint and cut_food_hint.get("matched") and base_wet >= 0.12:
+            return cut_food_hint
+        if appearance_hint and appearance_hint.get("matched") and base_wet >= 0.20:
+            return appearance_hint
 
         return {
             "matched": False,
