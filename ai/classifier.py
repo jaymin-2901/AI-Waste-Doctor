@@ -13,6 +13,7 @@ import random
 from collections import deque
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from ai.preprocessing import preprocess_frame
@@ -252,10 +253,87 @@ class WasteClassifier:
         y = max(0, min(y, height - side))
         return x, y, side, side
 
+    def _appearance_food_hint(self, frame, crop_box):
+        """Offline fallback for obvious fresh-food/fruit objects."""
+        try:
+            x, y, w, h = self._scaled_crop_box(frame, crop_box, 0.90)
+            crop = frame[y:y + h, x:x + w]
+            if crop.size == 0:
+                return None
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            red = (
+                cv2.inRange(hsv, (0, 55, 35), (18, 255, 255))
+                | cv2.inRange(hsv, (165, 55, 35), (179, 255, 255))
+            )
+            produce_color = (
+                cv2.inRange(hsv, (20, 55, 45), (45, 255, 255))
+                | cv2.inRange(hsv, (45, 45, 35), (95, 255, 230))
+            )
+            red_ratio = float(np.mean(red > 0))
+            produce_ratio = float(np.mean(produce_color > 0))
+
+            def largest_component(mask):
+                count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+                if count <= 1:
+                    return 0.0, 0.0
+                areas = stats[1:, cv2.CC_STAT_AREA]
+                idx = int(np.argmax(areas)) + 1
+                area = float(stats[idx, cv2.CC_STAT_AREA])
+                box_area = float(stats[idx, cv2.CC_STAT_WIDTH] * stats[idx, cv2.CC_STAT_HEIGHT])
+                total = float(mask.shape[0] * mask.shape[1])
+                return area / total, area / max(1.0, box_area)
+
+            red_component_ratio, red_fill = largest_component(red)
+            produce_component_ratio, produce_fill = largest_component(produce_color)
+
+            pale = cv2.inRange(hsv, (0, 8, 95), (45, 155, 255))
+            near_red = cv2.dilate(red, np.ones((31, 31), np.uint8), iterations=1)
+            pale_near_red = float(np.mean((pale > 0) & (near_red > 0)))
+
+            red_apple_like = (
+                red_ratio >= 0.025
+                and red_component_ratio >= 0.035
+                and red_fill >= 0.20
+                and pale_near_red >= 0.035
+            )
+            whole_fruit_like = (
+                produce_ratio >= 0.045
+                and produce_component_ratio >= 0.045
+                and produce_fill >= 0.20
+            )
+            if not (red_apple_like or whole_fruit_like):
+                return None
+
+            evidence = min(
+                0.98,
+                0.62
+                + min(red_component_ratio / 0.12, 1.0) * 0.16
+                + min(pale_near_red / 0.15, 1.0) * 0.12
+                + min(max(produce_component_ratio, red_component_ratio) / 0.20, 1.0) * 0.10,
+            )
+            label = "apple / fresh produce" if red_apple_like else "fresh produce"
+            return {
+                "matched": True,
+                "category": "Wet Waste",
+                "label": label,
+                "confidence": round(evidence * 100.0, 1),
+                "produce_mass": round(max(red_ratio, produce_ratio) * 100.0, 1),
+                "food_mass": round(max(red_component_ratio, produce_component_ratio) * 100.0, 1),
+                "recyclable_mass": 0.0,
+                "supporting_views": 1,
+                "base_wet_confidence": 0.0,
+                "direction": "wet",
+                "source": "offline-food-appearance-guard",
+            }
+        except Exception as error:
+            print(f"[Classifier] Offline food appearance guard skipped: {error}")
+            return None
+
     def _semantic_hint(self, frame, crop_box, base_probs):
         """Run several center crops and collect strong food/non-food evidence."""
+        appearance_hint = self._appearance_food_hint(frame, crop_box)
         if self.semantic_model is None:
-            return None
+            return appearance_hint
 
         try:
             view_scales = (0.60, 0.76, 0.90, 1.0)
@@ -284,7 +362,7 @@ class WasteClassifier:
         except Exception as error:
             self.semantic_error = str(error)
             print(f"[Classifier] Semantic inference skipped: {error}")
-            return None
+            return appearance_hint
 
         wet_index = self._wet_label_index()
         base_wet = float(base_probs[wet_index]) if wet_index is not None else 0.0
@@ -389,6 +467,9 @@ class WasteClassifier:
                 "direction": "wet",
                 "views": details,
             }
+
+        if appearance_hint and appearance_hint.get("matched"):
+            return appearance_hint
 
         if recyclable_match:
             return {
