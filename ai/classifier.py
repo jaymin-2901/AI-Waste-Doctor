@@ -353,6 +353,119 @@ class WasteClassifier:
             print(f"[Classifier] Offline food appearance guard skipped: {error}")
             return None
 
+    def _appearance_cut_food_hint(self, frame, crop_box):
+        """Detect a bounded pale food/fruit piece such as a cut apple.
+
+        This is deliberately based on object geometry + a warm/dark skin ring,
+        not simply on "light" pixels. It is a fallback for cut fruit that
+        ImageNet may not recognize reliably.
+        """
+        try:
+            x, y, w, h = self._scaled_crop_box(frame, crop_box, 0.90)
+            crop = frame[y:y + h, x:x + w]
+            if crop.size == 0:
+                return None
+
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+
+            # Cream/white edible flesh: moderately low saturation, reasonably
+            # bright. Reject very dark and highly saturated objects.
+            pale = cv2.inRange(hsv, (4, 8, 105), (48, 145, 255))
+            pale = cv2.morphologyEx(
+                pale, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8)
+            )
+            pale = cv2.morphologyEx(
+                pale, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8)
+            )
+
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(pale, 8)
+            if count <= 1:
+                return None
+
+            total = float(crop.shape[0] * crop.shape[1])
+            candidates = []
+            for component in range(1, count):
+                area = float(stats[component, cv2.CC_STAT_AREA])
+                if area <= 0:
+                    continue
+                bx = int(stats[component, cv2.CC_STAT_LEFT])
+                by = int(stats[component, cv2.CC_STAT_TOP])
+                bw = int(stats[component, cv2.CC_STAT_WIDTH])
+                bh = int(stats[component, cv2.CC_STAT_HEIGHT])
+                ratio = area / total
+                fill = area / max(1.0, float(bw * bh))
+                aspect = bw / max(1.0, float(bh))
+
+                # The candidate must be a bounded, substantial object. A
+                # background wall/floor normally touches the scan boundary.
+                margin = max(4, int(min(crop.shape[:2]) * 0.025))
+                touches = (
+                    bx <= margin
+                    or by <= margin
+                    or bx + bw >= crop.shape[1] - margin
+                    or by + bh >= crop.shape[0] - margin
+                )
+                if touches:
+                    continue
+                if ratio < 0.16 or fill < 0.48 or aspect < 0.60 or aspect > 2.10:
+                    continue
+
+                component_mask = np.zeros_like(pale)
+                component_mask[labels == component] = 255
+                ring = cv2.dilate(
+                    component_mask, np.ones((17, 17), np.uint8), iterations=1
+                )
+                ring = (ring > 0) & (component_mask == 0)
+
+                # Fruit skin / browned cut edge. This catches red, brown and
+                # warm-yellow outlines around pale flesh without requiring red.
+                warm = (
+                    cv2.inRange(hsv, (0, 18, 18), (38, 220, 220)) > 0
+                )
+                warm_ring_ratio = float(np.mean(warm[ring])) if np.any(ring) else 0.0
+
+                # Dark outline/seed regions strengthen the cut-fruit signal.
+                dark = (hsv[..., 2] < 115) & (hsv[..., 1] > 15)
+                dark_ring_ratio = float(np.mean(dark[ring])) if np.any(ring) else 0.0
+
+                if warm_ring_ratio < 0.10 and dark_ring_ratio < 0.08:
+                    continue
+
+                candidates.append(
+                    (ratio, fill, aspect, warm_ring_ratio, dark_ring_ratio)
+                )
+
+            if not candidates:
+                return None
+
+            ratio, fill, aspect, warm_ring_ratio, dark_ring_ratio = max(
+                candidates, key=lambda item: item[0]
+            )
+            evidence = min(
+                0.98,
+                0.78
+                + min(ratio / 0.50, 1.0) * 0.10
+                + min(fill / 0.90, 1.0) * 0.05
+                + min(warm_ring_ratio / 0.30, 1.0) * 0.04
+                + min(dark_ring_ratio / 0.25, 1.0) * 0.03,
+            )
+            return {
+                "matched": True,
+                "category": "Wet Waste",
+                "label": "cut fruit / fresh food",
+                "confidence": round(evidence * 100.0, 1),
+                "produce_mass": round(ratio * 100.0, 1),
+                "food_mass": round(ratio * 100.0, 1),
+                "recyclable_mass": 0.0,
+                "supporting_views": 1,
+                "base_wet_confidence": 0.0,
+                "direction": "wet",
+                "source": "offline-cut-food-appearance-guard",
+            }
+        except Exception as error:
+            print(f"[Classifier] Offline cut-food guard skipped: {error}")
+            return None
+
     def _appearance_dry_hint(self, frame, crop_box):
         """Offline fallback for obvious non-organic metal/plastic objects.
 
@@ -445,9 +558,12 @@ class WasteClassifier:
     def _semantic_hint(self, frame, crop_box, base_probs):
         """Run several center crops and collect strong food/non-food evidence."""
         appearance_hint = self._appearance_food_hint(frame, crop_box)
+        cut_food_hint = self._appearance_cut_food_hint(frame, crop_box)
         dry_appearance_hint = self._appearance_dry_hint(frame, crop_box)
         if appearance_hint and appearance_hint.get("matched"):
             return appearance_hint
+        if cut_food_hint and cut_food_hint.get("matched"):
+            return cut_food_hint
         if self.semantic_model is None:
             return dry_appearance_hint
 
@@ -478,7 +594,7 @@ class WasteClassifier:
         except Exception as error:
             self.semantic_error = str(error)
             print(f"[Classifier] Semantic inference skipped: {error}")
-            return appearance_hint or dry_appearance_hint
+            return appearance_hint or cut_food_hint or dry_appearance_hint
 
         wet_index = self._wet_label_index()
         base_wet = float(base_probs[wet_index]) if wet_index is not None else 0.0
