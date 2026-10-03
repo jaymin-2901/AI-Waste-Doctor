@@ -354,11 +354,13 @@ class WasteClassifier:
             return None
 
     def _appearance_cut_food_hint(self, frame, crop_box):
-        """Detect a bounded pale food/fruit piece such as a cut apple.
+        """Detect a centered cut fruit/food piece using foreground segmentation.
 
-        This is deliberately based on object geometry + a warm/dark skin ring,
-        not simply on "light" pixels. It is a fallback for cut fruit that
-        ImageNet may not recognize reliably.
+        Color-only rules are unreliable because wood/floor/background colors can
+        look like fruit. GrabCut uses the scan-zone border as background and the
+        center as probable foreground, then checks for a substantial pale edible
+        object with a warm/dark outer edge. This is a fallback, not the primary
+        trained model.
         """
         try:
             x, y, w, h = self._scaled_crop_box(frame, crop_box, 0.90)
@@ -366,24 +368,45 @@ class WasteClassifier:
             if crop.size == 0:
                 return None
 
-            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            # Keep this guard lightweight enough for live camera inference.
+            side = min(280, crop.shape[1], crop.shape[0])
+            if side < 96:
+                return None
+            small = cv2.resize(crop, (side, side), interpolation=cv2.INTER_AREA)
 
-            # Cream/white edible flesh: moderately low saturation, reasonably
-            # bright. Reject very dark and highly saturated objects.
-            pale = cv2.inRange(hsv, (4, 8, 105), (48, 145, 255))
-            pale = cv2.morphologyEx(
-                pale, cv2.MORPH_CLOSE, np.ones((21, 21), np.uint8)
+            mask = np.full((side, side), cv2.GC_BGD, dtype=np.uint8)
+            border = max(5, int(side * 0.07))
+            mask[border:-border, border:-border] = cv2.GC_PR_FGD
+            mask[
+                int(side * 0.20):int(side * 0.82),
+                int(side * 0.16):int(side * 0.84),
+            ] = cv2.GC_FGD
+
+            bgd_model = np.zeros((1, 65), np.float64)
+            fgd_model = np.zeros((1, 65), np.float64)
+            cv2.grabCut(
+                small,
+                mask,
+                None,
+                bgd_model,
+                fgd_model,
+                2,
+                cv2.GC_INIT_WITH_MASK,
             )
-            pale = cv2.morphologyEx(
-                pale, cv2.MORPH_OPEN, np.ones((7, 7), np.uint8)
+            foreground = (
+                (mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD)
             )
 
-            count, labels, stats, _ = cv2.connectedComponentsWithStats(pale, 8)
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(
+                foreground.astype(np.uint8), 8
+            )
             if count <= 1:
                 return None
 
-            total = float(crop.shape[0] * crop.shape[1])
+            hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+            total = float(side * side)
             candidates = []
+
             for component in range(1, count):
                 area = float(stats[component, cv2.CC_STAT_AREA])
                 if area <= 0:
@@ -396,58 +419,75 @@ class WasteClassifier:
                 fill = area / max(1.0, float(bw * bh))
                 aspect = bw / max(1.0, float(bh))
 
-                # The candidate must be a bounded, substantial object. A
-                # background wall/floor normally touches the scan boundary.
-                margin = max(4, int(min(crop.shape[:2]) * 0.025))
+                margin = max(5, int(side * 0.055))
                 touches = (
                     bx <= margin
                     or by <= margin
-                    or bx + bw >= crop.shape[1] - margin
-                    or by + bh >= crop.shape[0] - margin
+                    or bx + bw >= side - margin
+                    or by + bh >= side - margin
                 )
                 if touches:
                     continue
-                if ratio < 0.16 or fill < 0.48 or aspect < 0.60 or aspect > 2.10:
+                if ratio < 0.18 or ratio > 0.86:
+                    continue
+                if fill < 0.52 or aspect < 0.60 or aspect > 1.85:
                     continue
 
-                component_mask = np.zeros_like(pale)
-                component_mask[labels == component] = 255
-                ring = cv2.dilate(
-                    component_mask, np.ones((17, 17), np.uint8), iterations=1
+                component_mask = labels == component
+                pale = (
+                    (hsv[..., 1] <= 155)
+                    & (hsv[..., 2] >= 105)
                 )
-                ring = (ring > 0) & (component_mask == 0)
+                pale_ratio = float(np.mean(pale[component_mask]))
+                if pale_ratio < 0.42:
+                    continue
 
-                # Fruit skin / browned cut edge. This catches red, brown and
-                # warm-yellow outlines around pale flesh without requiring red.
-                warm = (
-                    cv2.inRange(hsv, (0, 18, 18), (38, 220, 220)) > 0
-                )
-                warm_ring_ratio = float(np.mean(warm[ring])) if np.any(ring) else 0.0
+                # Look immediately outside the segmented object for fruit skin,
+                # browned edges, seeds, or warm organic material.
+                component_u8 = component_mask.astype(np.uint8) * 255
+                dilated = cv2.dilate(
+                    component_u8, np.ones((13, 13), np.uint8), iterations=1
+                ) > 0
+                ring = dilated & ~component_mask
+                if not np.any(ring):
+                    continue
 
-                # Dark outline/seed regions strengthen the cut-fruit signal.
+                warm = cv2.inRange(
+                    hsv, (0, 15, 20), (38, 220, 225)
+                ) > 0
                 dark = (hsv[..., 2] < 115) & (hsv[..., 1] > 15)
-                dark_ring_ratio = float(np.mean(dark[ring])) if np.any(ring) else 0.0
+                warm_ring = float(np.mean(warm[ring]))
+                dark_ring = float(np.mean(dark[ring]))
 
-                if warm_ring_ratio < 0.10 and dark_ring_ratio < 0.08:
+                # White paper/plastic can be pale, but normally lacks the
+                # warm/dark organic edge seen on cut fruit.
+                if warm_ring < 0.15 and dark_ring < 0.10:
                     continue
 
                 candidates.append(
-                    (ratio, fill, aspect, warm_ring_ratio, dark_ring_ratio)
+                    (
+                        ratio,
+                        fill,
+                        aspect,
+                        pale_ratio,
+                        warm_ring,
+                        dark_ring,
+                    )
                 )
 
             if not candidates:
                 return None
 
-            ratio, fill, aspect, warm_ring_ratio, dark_ring_ratio = max(
+            ratio, fill, aspect, pale_ratio, warm_ring, dark_ring = max(
                 candidates, key=lambda item: item[0]
             )
             evidence = min(
                 0.98,
                 0.78
-                + min(ratio / 0.50, 1.0) * 0.10
-                + min(fill / 0.90, 1.0) * 0.05
-                + min(warm_ring_ratio / 0.30, 1.0) * 0.04
-                + min(dark_ring_ratio / 0.25, 1.0) * 0.03,
+                + min(ratio / 0.65, 1.0) * 0.08
+                + min(pale_ratio / 0.80, 1.0) * 0.06
+                + min(warm_ring / 0.45, 1.0) * 0.05
+                + min(dark_ring / 0.30, 1.0) * 0.03,
             )
             return {
                 "matched": True,
@@ -455,12 +495,12 @@ class WasteClassifier:
                 "label": "cut fruit / fresh food",
                 "confidence": round(evidence * 100.0, 1),
                 "produce_mass": round(ratio * 100.0, 1),
-                "food_mass": round(ratio * 100.0, 1),
+                "food_mass": round(pale_ratio * 100.0, 1),
                 "recyclable_mass": 0.0,
                 "supporting_views": 1,
                 "base_wet_confidence": 0.0,
                 "direction": "wet",
-                "source": "offline-cut-food-appearance-guard",
+                "source": "offline-cut-food-segmentation-guard",
             }
         except Exception as error:
             print(f"[Classifier] Offline cut-food guard skipped: {error}")
