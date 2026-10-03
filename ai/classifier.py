@@ -217,7 +217,16 @@ class WasteClassifier:
                 return index
         return None
 
+    def _dry_label_index(self):
+        """Return the Dry Waste class used by the application's 3-class model."""
+        for index, label in enumerate(self.labels):
+            normalized = label.strip().lower()
+            if normalized == "dry waste" or normalized == "dry":
+                return index
+        return None
+
     def _recyclable_label_index(self):
+        # Kept for compatibility with older callers.
         for index, label in enumerate(self.labels):
             normalized = label.strip().lower()
             if normalized == "recyclable" or "recycle" in normalized:
@@ -329,11 +338,103 @@ class WasteClassifier:
             print(f"[Classifier] Offline food appearance guard skipped: {error}")
             return None
 
+    def _appearance_dry_hint(self, frame, crop_box):
+        """Offline fallback for obvious non-organic metal/plastic objects.
+
+        This is intentionally conservative. It is primarily a safety net for
+        the Science Fair camera when the ImageNet second-opinion model cannot
+        download/load. A large centered metallic object (like the steel bottle
+        shown in the Science Fair test) is Dry Waste under this application's
+        category definitions.
+        """
+        try:
+            x, y, w, h = self._scaled_crop_box(frame, crop_box, 0.90)
+            crop = frame[y:y + h, x:x + w]
+            if crop.size == 0:
+                return None
+
+            hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+            sat = hsv[..., 1]
+            val = hsv[..., 2]
+
+            # Silver/steel surfaces are usually low saturation with bright
+            # highlights. Require a connected, vertically elongated region so
+            # the wooden/background surface is not enough to trigger this.
+            metallic = cv2.inRange(hsv, (0, 0, 95), (179, 82, 255))
+            metallic = cv2.morphologyEx(
+                metallic, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8)
+            )
+            metallic = cv2.morphologyEx(
+                metallic, cv2.MORPH_CLOSE, np.ones((13, 13), np.uint8)
+            )
+
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(metallic, 8)
+            total = float(crop.shape[0] * crop.shape[1])
+            best = None
+            for component in range(1, count):
+                area = float(stats[component, cv2.CC_STAT_AREA])
+                if area <= 0:
+                    continue
+                bw = float(stats[component, cv2.CC_STAT_WIDTH])
+                bh = float(stats[component, cv2.CC_STAT_HEIGHT])
+                bx = float(stats[component, cv2.CC_STAT_LEFT])
+                by = float(stats[component, cv2.CC_STAT_TOP])
+                fill = area / max(1.0, bw * bh)
+                ratio = area / total
+                center_distance = abs((bx + bw / 2.0) / crop.shape[1] - 0.5)
+                if ratio >= 0.035 and bh / max(1.0, bw) >= 1.35 and fill >= 0.18:
+                    score = ratio + fill * 0.03 - center_distance * 0.02
+                    if best is None or score > best[0]:
+                        best = (score, ratio, fill, bh / max(1.0, bw))
+
+            if best is None:
+                return None
+
+            _, metallic_ratio, metallic_fill, aspect = best
+            bright_low_sat = float(np.mean((sat < 85) & (val > 105)))
+
+            # Also accept a broad high-contrast metallic surface, but require
+            # enough low-saturation bright pixels so wood/skin does not pass.
+            metallic_match = (
+                metallic_ratio >= 0.055
+                and metallic_fill >= 0.22
+                and bright_low_sat >= 0.16
+            )
+            if not metallic_match:
+                return None
+
+            evidence = min(
+                0.96,
+                0.70
+                + min(metallic_ratio / 0.30, 1.0) * 0.14
+                + min(bright_low_sat / 0.55, 1.0) * 0.10
+                + min((aspect - 1.35) / 2.5, 1.0) * 0.06,
+            )
+            return {
+                "matched": True,
+                "category": "Dry Waste",
+                "label": "metal / non-organic object",
+                "confidence": round(evidence * 100.0, 1),
+                "produce_mass": 0.0,
+                "food_mass": 0.0,
+                "recyclable_mass": round(metallic_ratio * 100.0, 1),
+                "supporting_views": 1,
+                "base_wet_confidence": 0.0,
+                "direction": "dry",
+                "source": "offline-material-appearance-guard",
+            }
+        except Exception as error:
+            print(f"[Classifier] Offline dry material guard skipped: {error}")
+            return None
+
     def _semantic_hint(self, frame, crop_box, base_probs):
         """Run several center crops and collect strong food/non-food evidence."""
         appearance_hint = self._appearance_food_hint(frame, crop_box)
-        if self.semantic_model is None:
+        dry_appearance_hint = self._appearance_dry_hint(frame, crop_box)
+        if appearance_hint and appearance_hint.get("matched"):
             return appearance_hint
+        if self.semantic_model is None:
+            return dry_appearance_hint
 
         try:
             view_scales = (0.60, 0.76, 0.90, 1.0)
@@ -468,13 +569,13 @@ class WasteClassifier:
                 "views": details,
             }
 
-        if appearance_hint and appearance_hint.get("matched"):
-            return appearance_hint
+        if dry_appearance_hint and dry_appearance_hint.get("matched"):
+            return dry_appearance_hint
 
         if recyclable_match:
             return {
                 "matched": True,
-                "category": "Recyclable",
+                "category": "Dry Waste",
                 "label": IMAGENET_CLASS_MAP.get(best_recyclable[0]),
                 "confidence": round(best_recyclable[1] * 100.0, 1),
                 "produce_mass": round(max_produce_mass * 100.0, 1),
@@ -482,7 +583,7 @@ class WasteClassifier:
                 "recyclable_mass": round(max_recyclable_mass * 100.0, 1),
                 "supporting_views": recyclable_views,
                 "base_wet_confidence": round(base_wet * 100.0, 1),
-                "direction": "recyclable",
+                "direction": "dry",
                 "views": details,
             }
 
@@ -509,10 +610,10 @@ class WasteClassifier:
             target_index = self._wet_label_index()
             minimum = 0.78
             maximum = 0.94
-        elif direction == "recyclable":
-            target_index = self._recyclable_label_index()
-            minimum = 0.76
-            maximum = 0.93
+        elif direction == "dry":
+            target_index = self._dry_label_index()
+            minimum = 0.78
+            maximum = 0.94
         else:
             return raw_probs, False
 
@@ -530,7 +631,7 @@ class WasteClassifier:
         if direction == "wet":
             target = min(maximum, max(minimum, 0.70 + 0.48 * evidence + 0.18 * base_wet))
         else:
-            target = min(maximum, max(minimum, 0.70 + 0.40 * evidence))
+            target = min(maximum, max(minimum, 0.70 + 0.44 * evidence))
 
         remaining = 1.0 - target
         other_indices = [i for i in range(len(probs)) if i != target_index]
@@ -614,8 +715,8 @@ class WasteClassifier:
             label = semantic_hint.get("label") or "recognized object"
             if direction == "wet":
                 status = f"OK · OBJECT CROSS-CHECK: {label} → Wet Waste"
-            elif direction == "recyclable":
-                status = f"OK · OBJECT CROSS-CHECK: {label} → Recyclable"
+            elif direction == "dry":
+                status = f"OK · OBJECT CROSS-CHECK: {label} → Dry Waste"
 
         return {
             "raw_predictions": raw_dict,
