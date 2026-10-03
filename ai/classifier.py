@@ -295,12 +295,27 @@ class WasteClassifier:
             red_component_ratio, red_fill = largest_component(red)
             produce_component_ratio, produce_fill = largest_component(produce_color)
 
+            # Background wood can occupy a huge red/brown HSV region. A real
+            # fruit candidate should be a bounded object, not a color field
+            # running into the crop boundary.
+            red_count, red_labels, red_stats, _ = cv2.connectedComponentsWithStats(red, 8)
+            red_touches_border = False
+            if red_count > 1:
+                red_idx = 1 + int(np.argmax(red_stats[1:, cv2.CC_STAT_AREA]))
+                rx = int(red_stats[red_idx, cv2.CC_STAT_LEFT])
+                ry = int(red_stats[red_idx, cv2.CC_STAT_TOP])
+                rw = int(red_stats[red_idx, cv2.CC_STAT_WIDTH])
+                rh = int(red_stats[red_idx, cv2.CC_STAT_HEIGHT])
+                border_margin = max(3, int(min(crop.shape[:2]) * 0.025))
+                red_touches_border = (rx <= border_margin or ry <= border_margin or rx + rw >= crop.shape[1] - border_margin or ry + rh >= crop.shape[0] - border_margin)
+
             pale = cv2.inRange(hsv, (0, 8, 95), (45, 155, 255))
             near_red = cv2.dilate(red, np.ones((31, 31), np.uint8), iterations=1)
             pale_near_red = float(np.mean((pale > 0) & (near_red > 0)))
 
             red_apple_like = (
-                red_ratio >= 0.015
+                not red_touches_border
+                and red_ratio >= 0.015
                 and red_component_ratio >= 0.008
                 and red_fill >= 0.10
                 and pale_near_red >= 0.040
@@ -463,7 +478,7 @@ class WasteClassifier:
         except Exception as error:
             self.semantic_error = str(error)
             print(f"[Classifier] Semantic inference skipped: {error}")
-            return appearance_hint
+            return appearance_hint or dry_appearance_hint
 
         wet_index = self._wet_label_index()
         base_wet = float(base_probs[wet_index]) if wet_index is not None else 0.0
@@ -553,6 +568,23 @@ class WasteClassifier:
             or (best_recyclable[1] >= 0.32 and base_wet >= 0.45)
         )
 
+        # Strong bottle/plastic/electronic evidence always wins over weak
+        # produce evidence. These are non-organic materials and map to Dry Waste.
+        if recyclable_match:
+            return {
+                "matched": True,
+                "category": "Dry Waste",
+                "label": IMAGENET_CLASS_MAP.get(best_recyclable[0]),
+                "confidence": round(best_recyclable[1] * 100.0, 1),
+                "produce_mass": round(max_produce_mass * 100.0, 1),
+                "food_mass": round(max_food_mass * 100.0, 1),
+                "recyclable_mass": round(max_recyclable_mass * 100.0, 1),
+                "supporting_views": recyclable_views,
+                "base_wet_confidence": round(base_wet * 100.0, 1),
+                "direction": "dry",
+                "views": details,
+            }
+
         if produce_match or cooked_match:
             candidate = best_produce if produce_match else best_food
             return {
@@ -571,21 +603,6 @@ class WasteClassifier:
 
         if dry_appearance_hint and dry_appearance_hint.get("matched"):
             return dry_appearance_hint
-
-        if recyclable_match:
-            return {
-                "matched": True,
-                "category": "Dry Waste",
-                "label": IMAGENET_CLASS_MAP.get(best_recyclable[0]),
-                "confidence": round(best_recyclable[1] * 100.0, 1),
-                "produce_mass": round(max_produce_mass * 100.0, 1),
-                "food_mass": round(max_food_mass * 100.0, 1),
-                "recyclable_mass": round(max_recyclable_mass * 100.0, 1),
-                "supporting_views": recyclable_views,
-                "base_wet_confidence": round(base_wet * 100.0, 1),
-                "direction": "dry",
-                "views": details,
-            }
 
         return {
             "matched": False,
