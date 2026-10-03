@@ -22,20 +22,23 @@ from api_client import ClassificationError, classify_image
 from live_scan import LiveScanState, LiveVideoProcessor
 
 DEFAULT_API_URL = "https://ai-waste-doctor-api.onrender.com"
-EXPECTED_API_BUILD = "2026-10-03-science-fair-object-guard-v8"
-LIVE_INFERENCE_INTERVAL = 0.90
-LIVE_INITIAL_SETTLE_SECONDS = 0.75
-LIVE_DECISION_HOLD_SECONDS = 1.0
-LIVE_SCENE_CHANGE_THRESHOLD = 18.0
-LIVE_SCENE_CHANGE_HITS = 3
-LIVE_ERROR_COOLDOWN = 6.0
-LIVE_PREDICT_TIMEOUT = 30
-LIVE_INFERENCE_INTERVAL = 0.90
-LIVE_INITIAL_SETTLE_SECONDS = 0.75
-LIVE_DECISION_HOLD_SECONDS = 1.0
-LIVE_SCENE_CHANGE_THRESHOLD = 18.0
-LIVE_SCENE_CHANGE_HITS = 3
-LIVE_ERROR_COOLDOWN = 6.0
+EXPECTED_API_BUILD = "2026-10-03-science-fair-low-latency-v9"
+LIVE_INFERENCE_INTERVAL = 0.35
+LIVE_INITIAL_SETTLE_SECONDS = 0.30
+LIVE_DECISION_HOLD_SECONDS = 0.45
+LIVE_SCENE_CHANGE_THRESHOLD = 16.0
+LIVE_SCENE_CHANGE_HITS = 2
+LIVE_ERROR_COOLDOWN = 2.0
+LIVE_PREDICT_TIMEOUT = 12
+LIVE_MIN_SHARPNESS = 28.0
+LIVE_MIN_BRIGHTNESS = 28.0
+LIVE_MAX_BRIGHTNESS = 238.0
+LIVE_INFERENCE_INTERVAL = 0.35
+LIVE_INITIAL_SETTLE_SECONDS = 0.30
+LIVE_DECISION_HOLD_SECONDS = 0.45
+LIVE_SCENE_CHANGE_THRESHOLD = 16.0
+LIVE_SCENE_CHANGE_HITS = 2
+LIVE_ERROR_COOLDOWN = 2.0
 CATEGORY_COLORS = {
     "Recyclable": "#FBBF24",
     "Dry Waste": "#60A5FA",
@@ -659,8 +662,8 @@ st.markdown(
     iframe[src*="streamlit_webrtc"] {
         width: 100% !important;
         min-width: 100% !important;
-        height: 128px !important;
-        min-height: 128px !important;
+        height: 540px !important;
+        min-height: 540px !important;
         aspect-ratio: auto !important;
         display: block;
         border: 0;
@@ -775,8 +778,8 @@ st.markdown(
         }
         .science-decision h2 { font-size: 1.55rem; }
         iframe[src*="streamlit_webrtc"] {
-            height: 112px !important;
-            min-height: 112px !important;
+            height: 420px !important;
+            min-height: 420px !important;
             border-radius: 12px;
         }
         .science-footer {
@@ -1348,18 +1351,18 @@ if active_view == "🎪  SCIENCE FAIR":
                 video_processor_factory=LiveVideoProcessor,
                 media_stream_constraints={
                     "video": {
-                        "width": {"ideal": 640, "min": 320},
-                        "height": {"ideal": 480, "min": 240},
-                        "frameRate": {"ideal": 15, "max": 20},
+                        "width": {"ideal": 1280, "min": 640},
+                        "height": {"ideal": 720, "min": 480},
+                        "frameRate": {"ideal": 30, "min": 20, "max": 30},
                         # "ideal" requests the selected mobile camera without
                         # rejecting devices that expose different constraints.
-                        "facingMode": {"ideal": "environment"},
+                        "facingMode": {"ideal": "user"},
                     },
                     "audio": False,
                 },
                 sendback_audio=False,
                 media_toggle_controls=False,
-                async_processing=True,
+                async_processing=False,
             )
 
             st.markdown(
