@@ -442,13 +442,15 @@ class WasteClassifier:
                 if pale_ratio < 0.42:
                     continue
 
-                # Look immediately outside the segmented object for fruit skin,
-                # browned edges, seeds, or warm organic material.
-                component_u8 = component_mask.astype(np.uint8) * 255
-                dilated = cv2.dilate(
-                    component_u8, np.ones((13, 13), np.uint8), iterations=1
+                # Inspect the object's own boundary. Cut fruit often has
+                # brown/red skin, seeds, or a browned edge INSIDE the
+                # foreground mask; looking only outside the object misses it.
+                eroded = cv2.erode(
+                    component_mask.astype(np.uint8),
+                    np.ones((13, 13), np.uint8),
+                    iterations=1,
                 ) > 0
-                ring = dilated & ~component_mask
+                ring = component_mask & ~eroded
                 if not np.any(ring):
                     continue
 
@@ -461,7 +463,7 @@ class WasteClassifier:
 
                 # White paper/plastic can be pale, but normally lacks the
                 # warm/dark organic edge seen on cut fruit.
-                if warm_ring < 0.15 and dark_ring < 0.10:
+                if warm_ring < 0.18 and dark_ring < 0.12:
                     continue
 
                 candidates.append(
