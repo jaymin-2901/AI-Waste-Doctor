@@ -3,9 +3,10 @@
 The trained three-class waste model is the primary classifier.  Science Fair
 mode additionally uses an object-centric ImageNet MobileNetV2 second opinion.
 The second opinion is deliberately conservative: it can promote strong food
-evidence to Wet Waste and can demote a clearly recognized bottle/plastic/electronic
-object away from Wet Waste.  This prevents a single bad 3-class prediction from
-being presented as a confident final bin decision.
+evidence to Wet Waste and can promote clearly recognized recyclable objects to
+Recyclable. Dry Waste is reserved for genuinely dry materials such as paper and
+cardboard. This prevents a single bad 3-class prediction from being presented as
+a confident final bin decision.
 """
 
 import os
@@ -37,8 +38,9 @@ except ImportError:
     TF_AVAILABLE = False
 
 
-# MobileNetV2/ImageNet-1K indices.  These are used only as a second opinion;
+# MobileNetV2/ImageNet-1K indices. These are used only as a second opinion;
 # the trained waste model still supplies the application probabilities.
+# Object/material semantics are mapped to the application's three bins.
 IMAGENET_CLASS_MAP = {
     # food / produce
     924: "guacamole",
@@ -94,7 +96,7 @@ IMAGENET_CLASS_MAP = {
 
 PRODUCE_INDICES = tuple(range(936, 958))
 COOKED_FOOD_INDICES = (924, 925, 926, 927, 928, 929, 930, 931, 932, 933, 934, 935, 959, 962, 963, 964, 965)
-RECYCLABLE_OBJECT_INDICES = (487, 508, 620, 664, 675, 725, 734, 741, 898)
+RECYCLABLE_OBJECT_INDICES = (487, 508, 620, 664, 675, 725, 734, 737, 898)
 
 
 class WasteClassifier:
@@ -514,7 +516,7 @@ class WasteClassifier:
         This is intentionally conservative. It is primarily a safety net for
         the Science Fair camera when the ImageNet second-opinion model cannot
         download/load. A large centered metallic object (like the steel bottle
-        shown in the Science Fair test) is Dry Waste under this application's
+        shown in the Science Fair test) is Recyclable under this application's
         category definitions.
         """
         try:
@@ -582,7 +584,7 @@ class WasteClassifier:
             )
             return {
                 "matched": True,
-                "category": "Dry Waste",
+                "category": "Recyclable",
                 "label": "metal / non-organic object",
                 "confidence": round(evidence * 100.0, 1),
                 "produce_mass": 0.0,
@@ -727,11 +729,11 @@ class WasteClassifier:
         )
 
         # Strong bottle/plastic/electronic evidence always wins over weak
-        # produce evidence. These are non-organic materials and map to Dry Waste.
+        # produce evidence. These are recyclable materials and map to Recyclable.
         if recyclable_match:
             return {
                 "matched": True,
-                "category": "Dry Waste",
+                "category": "Recyclable",
                 "label": IMAGENET_CLASS_MAP.get(best_recyclable[0]),
                 "confidence": round(best_recyclable[1] * 100.0, 1),
                 "produce_mass": round(max_produce_mass * 100.0, 1),
@@ -891,7 +893,7 @@ class WasteClassifier:
             if direction == "wet":
                 status = f"OK · OBJECT CROSS-CHECK: {label} → Wet Waste"
             elif direction == "dry":
-                status = f"OK · OBJECT CROSS-CHECK: {label} → Dry Waste"
+                status = f"OK · OBJECT CROSS-CHECK: {label} → Recyclable"
 
         return {
             "raw_predictions": raw_dict,
