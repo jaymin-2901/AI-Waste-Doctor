@@ -22,8 +22,10 @@ class StableDecisionTracker:
         self,
         threshold: float = 70.0,
         required_frames: int = 3,
+        minimum_margin: float = 12.0,
     ):
         self.threshold = float(threshold)
+        self.minimum_margin = max(0.0, float(minimum_margin))
         self.required_frames = max(
             1,
             int(required_frames),
@@ -55,14 +57,16 @@ class StableDecisionTracker:
                 False,
             )
 
-        top_class, confidence = max(
-            predictions.items(),
+        ranked = sorted(
+            ((str(label), float(value)) for label, value in predictions.items()),
             key=lambda item: item[1],
+            reverse=True,
         )
+        top_class, confidence = ranked[0]
+        second_confidence = ranked[1][1] if len(ranked) > 1 else 0.0
+        margin = confidence - second_confidence
 
-        confidence = float(confidence)
-
-        if confidence < self.threshold:
+        if confidence < self.threshold or margin < self.minimum_margin:
             self.reset()
 
             return DecisionSnapshot(
