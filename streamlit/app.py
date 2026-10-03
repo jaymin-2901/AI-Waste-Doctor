@@ -22,7 +22,7 @@ from api_client import ClassificationError, classify_image
 from live_scan import LiveScanState, LiveVideoProcessor
 
 DEFAULT_API_URL = "https://ai-waste-doctor-api.onrender.com"
-EXPECTED_API_BUILD = "2026-10-02-stable-live-lazy-semantic-v3.1"
+EXPECTED_API_BUILD = "2026-10-03-science-fair-food-guard-v4"
 LIVE_INFERENCE_INTERVAL = 0.90
 LIVE_INITIAL_SETTLE_SECONDS = 0.75
 LIVE_DECISION_HOLD_SECONDS = 1.0
