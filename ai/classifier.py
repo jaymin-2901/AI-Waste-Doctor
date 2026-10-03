@@ -96,7 +96,7 @@ IMAGENET_CLASS_MAP = {
 
 PRODUCE_INDICES = tuple(range(936, 958))
 COOKED_FOOD_INDICES = (924, 925, 926, 927, 928, 929, 930, 931, 932, 933, 934, 935, 959, 962, 963, 964, 965)
-RECYCLABLE_OBJECT_INDICES = (487, 508, 620, 664, 675, 725, 734, 737, 898)
+RECYCLABLE_OBJECT_INDICES = (487, 508, 620, 664, 675, 725, 734, 741, 898)
 
 
 class WasteClassifier:
@@ -592,7 +592,7 @@ class WasteClassifier:
                 "recyclable_mass": round(metallic_ratio * 100.0, 1),
                 "supporting_views": 1,
                 "base_wet_confidence": 0.0,
-                "direction": "dry",
+                "direction": "recyclable",
                 "source": "offline-material-appearance-guard",
             }
         except Exception as error:
@@ -741,7 +741,7 @@ class WasteClassifier:
                 "recyclable_mass": round(max_recyclable_mass * 100.0, 1),
                 "supporting_views": recyclable_views,
                 "base_wet_confidence": round(base_wet * 100.0, 1),
-                "direction": "dry",
+                "direction": "recyclable",
                 "views": details,
             }
 
@@ -785,6 +785,10 @@ class WasteClassifier:
         direction = hint.get("direction")
         if direction == "wet":
             target_index = self._wet_label_index()
+            minimum = 0.78
+            maximum = 0.94
+        elif direction == "recyclable":
+            target_index = self._recyclable_label_index()
             minimum = 0.78
             maximum = 0.94
         elif direction == "dry":
@@ -892,8 +896,10 @@ class WasteClassifier:
             label = semantic_hint.get("label") or "recognized object"
             if direction == "wet":
                 status = f"OK · OBJECT CROSS-CHECK: {label} → Wet Waste"
-            elif direction == "dry":
+            elif direction == "recyclable":
                 status = f"OK · OBJECT CROSS-CHECK: {label} → Recyclable"
+            elif direction == "dry":
+                status = f"OK · OBJECT CROSS-CHECK: {label} → Dry Waste"
 
         return {
             "raw_predictions": raw_dict,
